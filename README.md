@@ -2,7 +2,7 @@
 
 CLI agent orchestration for Herdr.
 
-Drover coordinates terminal-based coding agents like Claude Code, Codex, Kira CLI, OpenCode, and other CLI workers through Herdr workspaces, panes, statuses, and notifications.
+Drover coordinates terminal-based coding agents like Claude Code, Codex, Kiro CLI, OpenCode, and other CLI workers through Herdr workspaces, panes, statuses, and notifications.
 
 Herdr gives you the herd.
 Drover drives it toward done.
