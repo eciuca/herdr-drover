@@ -2,96 +2,97 @@
 
 CLI agent orchestration for Herdr.
 
-Drover coordinates terminal-based coding agents like Claude Code, Codex, Kiro CLI, OpenCode, and other CLI workers through Herdr workspaces, panes, statuses, and notifications.
+Drover coordinates terminal-based coding agents like Kiro CLI, Claude Code, Codex, OpenCode, and other CLI workers through Herdr workspaces, panes, statuses, and notifications.
 
-Herdr gives you the herd.
-Drover drives it toward done.
+Herdr gives you the herd. Drover drives it toward done.
 
-## Why
+## Status
 
-Coding agents are most useful when they can run in parallel, stay visible, and hand work back only when something needs attention.
-Herdr already makes agent sessions pleasant to use: remote SSH access, panes, agent status recognition, and notifications.
+Early prototype. Kiro CLI is the first target; Claude Code and Codex profiles are included so they can be routed from task files.
 
-Drover adds the missing orchestration layer:
+## Install
 
-- assign tasks to agents
-- launch agents in Herdr panes
-- coordinate multiple workers
-- watch for blocked/done states
-- collect progress
-- route review back to the human
-- keep work organized across repos and worktrees
+```bash
+npm install
+npm link
+```
 
-## Goals
+## Quick Start
 
-Drover is built for people who want to use Herdr as their main agent terminal, but need more than manual pane management.
-It should make it easy to:
+Dry-run the commands Drover would send to Herdr:
 
-- run Claude Code, Codex, Kira CLI, and other agents side by side
-- delegate tasks from one supervisor prompt
-- use Herdr as the visual runtime
-- keep agent state readable
-- work remotely over SSH
-- avoid constantly checking every terminal pane
+```bash
+drover run --dry-run --workers 2 "Implement a small feature and verify it"
+```
+
+Run a Kiro-first task file:
+
+```bash
+drover run --agent kiro --task-file examples/kiro-first.plan.md
+```
+
+Use an existing Herdr named session:
+
+```bash
+drover run --session work --agent kiro "Investigate the failing tests"
+```
+
+## Task Files
+
+Task files are Markdown lists. Each task can optionally choose an agent and stable worker name:
+
+```md
+- agent=kiro profile=developer name=planner inspect the repo and produce a short plan
+- agent=kiro profile=developer name=builder implement the plan and run focused checks
+- agent=codex name=reviewer review the diff for risks
+```
 
 ## How It Works
 
-Drover sits above Herdr and uses Herdr’s CLI/socket API to control the workspace.
+Drover uses Herdr's CLI/socket-backed control surface:
 
-A typical flow:
-1. Create or select a Herdr workspace
-2. Create worktrees or working directories
-3. Start one or more agent panes
-4. Send each agent a scoped task
-5. Monitor output and agent status
-6. Detect blocked, waiting, done, or review-needed states
-7. Notify the user or continue orchestration
+- creates or reuses a Herdr workspace
+- starts one visible Herdr agent pane per worker
+- sends each worker a scoped prompt
+- optionally waits for Herdr agent status `done`
+- can notify through Herdr when delegation starts
 
-## Example
-bash
-drover run "Implement the auth cleanup plan across the repo"
-Drover may split the task into workers:
-text
-planner     -> breaks down the task
-codex-1     -> edits backend auth flow
-claude-1    -> reviews edge cases
-codex-2     -> updates tests
-reviewer    -> summarizes changes and blockers
-Each worker runs in Herdr, so the human can inspect, interrupt, or continue any session directly.
+## Commands
 
-## Design Principles
+```bash
+drover run [options] "task"
+drover run --task-file plan.md [options]
+drover doctor
+drover profiles
+```
 
-- Herdr stays the main interface
-- - agents are real CLI processes, not hidden abstractions
-- every worker has a visible pane and readable state
-- orchestration should be inspectable, interruptible, and recoverable
-- human review is a first-class state, not an afterthought
-- works well over SSH
+Useful options:
 
-## Inspired By
+```text
+--agent kiro|codex|claude
+--agent-profile developer
+--agent-command "kiro --some-flag"
+--workers 3
+--cwd /path/to/repo
+--workspace w1
+--session work
+--wait
+--dry-run
+--no-notify
+```
 
-Drover takes inspiration from:
+## Design
 
-- AWS CLI Agent Orchestrator
-- tmux-based multi-agent workflows
-- Claude Code and Codex terminal workflows
-- Herdr’s agent-aware terminal experience
-  
-## Status
+Drover is intentionally thin. Herdr remains the actual runtime, UI, SSH-friendly surface, and status source. Drover adds a CAO-style supervisor layer on top: splitting work, launching workers, dispatching prompts, and collecting status.
 
-Early concept / prototype.
+See [docs/architecture.md](docs/architecture.md).
 
-Initial target:
+## Herdr Plugin
 
-- Herdr workspace discovery
-- pane creation
-- agent launch commands
-- task dispatch
-- status polling
-- blocked/done detection
-- summary output
+The repo includes a first `herdr-plugin.toml` so Drover can later be linked into Herdr:
 
-## Name
-A drover is someone who drives and guides a herd.
+```bash
+herdr plugin link /path/to/herdr-drover
+```
 
-That felt right for a Herdr orchestrator.
+The initial actions are intentionally minimal: `doctor` and a Kiro-first plan launcher.

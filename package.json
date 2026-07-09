@@ -1,0 +1,27 @@
+{
+  "name": "herdr-drover",
+  "version": "0.1.0",
+  "description": "Drover for Herdr: CLI agent orchestration for Herdr-managed coding agents.",
+  "type": "module",
+  "bin": {
+    "drover": "./bin/drover.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "doctor": "node ./bin/drover.mjs doctor",
+    "dry-run": "node ./bin/drover.mjs run --dry-run --workers 2 \"Implement a small feature and verify it\""
+  },
+  "keywords": [
+    "herdr",
+    "drover",
+    "agent-orchestrator",
+    "kiro-cli",
+    "codex",
+    "claude-code",
+    "coding-agents"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

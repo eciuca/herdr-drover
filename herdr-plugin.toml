@@ -1,0 +1,18 @@
+id = "ciuca.drover"
+name = "Drover"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Start Drover delegations from inside Herdr."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "doctor"
+title = "Drover Doctor"
+contexts = ["workspace"]
+command = ["node", "bin/drover.mjs", "doctor"]
+
+[[actions]]
+id = "kiro-plan"
+title = "Start Kiro Plan"
+contexts = ["workspace"]
+command = ["node", "bin/drover.mjs", "run", "--agent", "kiro", "--task-file", "examples/kiro-first.plan.md"]
