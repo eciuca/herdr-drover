@@ -36,10 +36,20 @@ Version 0.1 supports two delegation paths:
 
 The task-file path is the more reliable orchestration mode. It avoids pretending that a deterministic CLI can infer perfect splits without an LLM planner.
 
+## Facade
+
+`src/runtime.js` exposes `createDroverRuntime()` as the stable public API.
+`runDelegation` (used by the CLI) is a thin wrapper over it. Supervisors call
+`delegate`, `delegateMany`, `observe`, `collect`, `release`, and `close`. The
+runtime owns one lazy workspace and a worker registry keyed by worker name.
+
+Cleanup defaults to `keep`; teardown is explicit. Same-repo parallelism uses
+`isolation: "worktree"` (Herdr `worktree create`); cross-repo work uses one
+runtime per workspace.
+
 ## Next Steps
 
 - Add a planning phase that asks one agent to produce a task file, then launches the resulting workers.
 - Add `blocked` wait handling and automatic notification.
 - Add output collection with `herdr agent read` for a final supervisor summary.
-- Add worktree creation using `herdr worktree create` for isolated workers.
 - Add a Herdr plugin manifest so Drover can be invoked from inside Herdr.
