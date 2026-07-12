@@ -120,6 +120,14 @@ test("extractRootPaneId and extractAgentPaneId read herdr result shapes", () => 
 });
 
 import { createDroverRuntime } from "../src/runtime.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Throwaway dir for headless tests so they don't litter the OS tmp with real
+// prompt/output files; removed after the suite runs.
+const HEADLESS_TMP = mkdtempSync(join(tmpdir(), "drover-test-"));
+test.after(() => rmSync(HEADLESS_TMP, { recursive: true, force: true }));
 
 function makeFakeHerdr(responses = {}) {
   return {
@@ -326,7 +334,7 @@ test("runDelegation throws on empty task list", async () => {
 
 test("headless mode launches a non-interactive wrapper and does not send a prompt", async () => {
   const herdr = makeFakeHerdr();
-  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hl", execMode: "headless" });
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hl", execMode: "headless", headlessDir: HEADLESS_TMP });
   const w = await drover.delegate({ name: "worker", agent: "claude", task: "do the thing" });
 
   // No interactive prompt submission in headless mode.
@@ -346,7 +354,7 @@ test("headless mode launches a non-interactive wrapper and does not send a promp
 
 test("headless observe waits on the completion marker; collect reads the output file", async () => {
   const herdr = makeFakeHerdr();
-  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hl", execMode: "headless" });
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hl", execMode: "headless", headlessDir: HEADLESS_TMP });
   const w = await drover.delegate({ name: "worker", agent: "claude", task: "x" });
 
   await drover.observe(w.id, { timeoutMs: 1000 });
@@ -364,7 +372,7 @@ test("headless observe waits on the completion marker; collect reads the output 
 
 test("per-spec mode overrides the runtime default", async () => {
   const herdr = makeFakeHerdr();
-  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "mx", execMode: "interactive" });
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "mx", execMode: "interactive", headlessDir: HEADLESS_TMP });
   await drover.delegate({ name: "a", agent: "kiro", task: "interactive one" });
   await drover.delegate({ name: "b", agent: "claude", task: "headless one", mode: "headless" });
 

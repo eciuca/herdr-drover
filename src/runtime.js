@@ -33,7 +33,9 @@ export function createDroverRuntime(config = {}) {
   let workspacePromise = null;
   let rootPaneId;
   let bootstrapClosed = false;
-  let headlessDir;
+  // Where headless prompt/output files live. Overridable (config.headlessDir)
+  // so tests can point at a throwaway dir; otherwise created lazily on first use.
+  let headlessDir = config.headlessDir;
 
   async function ensureWorkspace() {
     if (workspace) return workspace;
