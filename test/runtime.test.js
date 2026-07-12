@@ -264,3 +264,34 @@ test("observe and collect throw on unknown worker id", async () => {
   await assert.rejects(() => drover.observe("nope"), /Unknown worker/);
   await assert.rejects(() => drover.collect("nope"), /Unknown worker/);
 });
+
+import { runDelegation } from "../src/orchestrator.js";
+
+test("runDelegation preserves legacy shape and notifies", async () => {
+  const herdr = makeFakeHerdr();
+  const result = await runDelegation({
+    herdr,
+    tasks: [
+      { name: "planner", agent: "kiro", profile: "developer", task: "plan it" },
+      { name: "builder", agent: "kiro", task: "build it" },
+    ],
+    options: {
+      cwd: "/repo",
+      namePrefix: "drover",
+      defaultAgent: "kiro",
+      goal: "ship",
+      wait: true,
+      notify: true,
+      splitDirection: "right",
+    },
+  });
+
+  assert.deepEqual(Object.keys(result).sort(), ["commands", "launched", "waits", "workspace"]);
+  assert.equal(result.launched.length, 2);
+  assert.equal(result.workspace.workspaceId, "ws-1");
+  assert.equal(only(herdr, "notify").length, 1);
+});
+
+test("runDelegation throws on empty task list", async () => {
+  await assert.rejects(() => runDelegation({ herdr: makeFakeHerdr(), tasks: [], options: {} }), /No tasks/);
+});
