@@ -445,6 +445,55 @@ test("missing pane id never warns in dry-run mode", async () => {
   assert.equal(messages.length, 0);
 });
 
+import { headlessCommandForAgent, getAgentProfile } from "../src/agents.js";
+
+test("headlessCommandForAgent returns the non-interactive kiro argv (stdin prompt)", () => {
+  const argv = headlessCommandForAgent(getAgentProfile("kiro"), undefined, "developer");
+  assert.deepEqual(argv, [
+    "kiro-cli",
+    "chat",
+    "--no-interactive",
+    "--trust-all-tools",
+    "--agent",
+    "developer",
+  ]);
+});
+
+test("headlessCommandForAgent returns the codex exec argv (UNVERIFIED, stdin prompt)", () => {
+  const argv = headlessCommandForAgent(getAgentProfile("codex"), undefined);
+  assert.deepEqual(argv, ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"]);
+});
+
+test("headless kiro worker wrapper contains the kiro headless tokens", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hk", execMode: "headless", headlessDir: HEADLESS_TMP });
+  await drover.delegate({ name: "worker", agent: "kiro", task: "do kiro thing" });
+
+  assert.equal(only(herdr, "sendAgent").length, 0);
+  const start = only(herdr, "startAgent")[0].args[0];
+  assert.deepEqual(start.command.slice(0, 2), ["bash", "-lc"]);
+  const script = start.command[2];
+  for (const tok of ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", "developer"]) {
+    assert.ok(script.includes(tok), tok);
+  }
+  assert.match(script, /__DROVER_DONE_hk-worker__/);
+});
+
+test("headless codex worker wrapper contains the codex headless tokens", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hc", execMode: "headless", headlessDir: HEADLESS_TMP });
+  await drover.delegate({ name: "worker", agent: "codex", task: "do codex thing" });
+
+  assert.equal(only(herdr, "sendAgent").length, 0);
+  const start = only(herdr, "startAgent")[0].args[0];
+  assert.deepEqual(start.command.slice(0, 2), ["bash", "-lc"]);
+  const script = start.command[2];
+  for (const tok of ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]) {
+    assert.ok(script.includes(tok), tok);
+  }
+  assert.match(script, /__DROVER_DONE_hc-worker__/);
+});
+
 test("cleanup:'close' closes the workspace when closeWorkspace is omitted", async () => {
   const herdr = makeFakeHerdr();
   const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "cl", cleanup: "close" });

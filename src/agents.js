@@ -9,6 +9,19 @@ export const AGENT_PROFILES = {
     herdrAgentHint: "kiro",
     promptPreamble:
       "You are a Kiro CLI worker managed by Drover. Work only on the assigned task, report blockers clearly, and finish with a concise status summary.",
+    // Headless (non-interactive) invocation. The Drover wrapper pipes the prompt
+    // on stdin, so no prompt goes in the argv. `--no-interactive` runs without
+    // expecting user input, `--trust-all-tools` bypasses tool-approval prompts,
+    // and `--agent <AGENT>` selects the profile.
+    //
+    // NOTE (issue #2): `kiro-cli chat` accepts an optional [INPUT] positional as
+    // its prompt. In --no-interactive mode kiro-cli also reads from stdin, so the
+    // Drover stdin wrapper works. If a future kiro-cli build ignores stdin and
+    // requires the [INPUT] positional, Drover will need a per-agent argv-prompt
+    // mode (the wrapper currently always feeds the prompt on stdin).
+    headlessCommand(profileName = "developer") {
+      return ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", profileName];
+    },
   },
   codex: {
     id: "codex",
@@ -17,6 +30,17 @@ export const AGENT_PROFILES = {
     herdrAgentHint: "codex",
     promptPreamble:
       "You are a Codex worker managed by Drover. Work only on the assigned task, avoid reverting unrelated changes, and finish with checks performed.",
+    // Headless (non-interactive) invocation. `codex exec` runs a single turn
+    // non-interactively; the prompt is piped on stdin by the Drover wrapper (no
+    // prompt in argv). `--dangerously-bypass-approvals-and-sandbox` runs without
+    // approval prompts or sandbox gating so the worker can act unattended.
+    //
+    // UNVERIFIED (issue #2): codex is NOT installed in this environment, so this
+    // argv could not be validated against a live CLI. Flag names/behavior should
+    // be confirmed on a machine with codex before relying on it.
+    headlessCommand() {
+      return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"];
+    },
   },
   claude: {
     id: "claude",
