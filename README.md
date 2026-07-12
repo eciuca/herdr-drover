@@ -81,6 +81,33 @@ Useful options:
 --no-notify
 ```
 
+## Supervisor Integration
+
+External supervisors bind to the stable facade in `src/runtime.js`, not to
+internal modules.
+
+```js
+import { createDroverRuntime } from "./src/runtime.js";
+
+const drover = createDroverRuntime({ session: "work", cwd: "/repo", namePrefix: "sup" });
+
+const planner = await drover.delegate({ name: "planner", agent: "kiro", profile: "developer", task: "Write a plan" });
+await drover.observe(planner.id, { status: "done" });
+const plan = await drover.collect(planner.id);
+
+const builder = await drover.delegate({ name: "builder", agent: "kiro", isolation: "worktree", task: `Implement:\n${plan.output}` });
+await drover.observe(builder.id, { status: "done" });
+
+await drover.close({ closeWorkspace: true }); // cleanup is opt-in; default keeps workers
+```
+
+- Hand-off is supervisor-driven: `delegate → observe → collect → delegate`.
+- Cleanup defaults to keep. Use `release(id)` / `close({ closeWorkspace })` to tear down.
+- Cross-repo work: one runtime per repo, sharing a session.
+- Same-repo parallel workers: pass `isolation: "worktree"` to avoid stomping.
+
+See `examples/supervisor-adapter.mjs` for a kiro plan→build→review run.
+
 ## Design
 
 Drover is intentionally thin. Herdr remains the actual runtime, UI, SSH-friendly surface, and status source. Drover adds a CAO-style supervisor layer on top: splitting work, launching workers, dispatching prompts, and collecting status.

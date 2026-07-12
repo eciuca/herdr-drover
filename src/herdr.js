@@ -16,7 +16,7 @@ export class HerdrCli {
     return this.session ? ["--session", this.session] : [];
   }
 
-  async run(args, { parseJson = true, input } = {}) {
+  async run(args, { parseJson = true, input, execTimeoutMs } = {}) {
     const fullArgs = [...this.baseArgs(), ...args];
     this.commands.push([this.bin, ...fullArgs]);
     if (this.dryRun) {
@@ -25,7 +25,9 @@ export class HerdrCli {
 
     const { stdout, stderr } = await execFileAsync(this.bin, fullArgs, {
       input,
-      timeout: this.timeoutMs,
+      // Blocking calls (wait ...) set their own budget; the default guards
+      // quick commands. A 0 disables the child timeout entirely.
+      timeout: execTimeoutMs ?? this.timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -49,6 +51,8 @@ export class HerdrCli {
     if (label) args.push("--label", label);
     for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
     args.push(focus ? "--focus" : "--no-focus");
+    // NOTE: `workspace create` emits JSON by default and rejects `--json`
+    // ("unknown option") on herdr 0.7.2. Do not add it here.
     return this.run(args);
   }
 
@@ -60,6 +64,8 @@ export class HerdrCli {
     if (split) args.push("--split", split);
     for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
     args.push(focus ? "--focus" : "--no-focus");
+    // NOTE: `agent start` emits JSON by default and rejects `--json` on herdr
+    // 0.7.2. Everything after `--` is the worker argv, so no flag may follow.
     args.push("--", ...command);
     return this.run(args);
   }
@@ -75,7 +81,19 @@ export class HerdrCli {
   }
 
   waitAgent(target, { status = "done", timeoutMs = 1_800_000 } = {}) {
-    return this.run(["wait", "agent-status", target, "--status", status, "--timeout", String(timeoutMs)]);
+    // Give the child process longer than herdr's own --timeout so herdr returns
+    // its clean timeout error before Node's execFile would kill it.
+    return this.run(["wait", "agent-status", target, "--status", status, "--timeout", String(timeoutMs)], {
+      execTimeoutMs: timeoutMs + 15_000,
+    });
+  }
+
+  waitOutput(paneId, { match, timeoutMs = 1_800_000, source, lines, regex = false } = {}) {
+    const args = ["wait", "output", paneId, "--match", match, "--timeout", String(timeoutMs)];
+    if (source) args.push("--source", source);
+    if (lines) args.push("--lines", String(lines));
+    if (regex) args.push("--regex");
+    return this.run(args, { execTimeoutMs: timeoutMs + 15_000 });
   }
 
   notify(title, body) {
@@ -84,14 +102,61 @@ export class HerdrCli {
     args.push("--sound", "done");
     return this.run(args);
   }
+
+  closePane(paneId) {
+    return this.run(["pane", "close", paneId]);
+  }
+
+  closeWorkspace(workspaceId) {
+    return this.run(["workspace", "close", workspaceId]);
+  }
+
+  createWorktree({ workspace, cwd, branch, base, path, label } = {}) {
+    const args = ["worktree", "create"];
+    if (workspace) args.push("--workspace", workspace);
+    else if (cwd) args.push("--cwd", cwd);
+    if (branch) args.push("--branch", branch);
+    if (base) args.push("--base", base);
+    if (path) args.push("--path", path);
+    if (label) args.push("--label", label);
+    args.push("--json");
+    return this.run(args);
+  }
 }
 
+// herdr 0.7.2 `workspace create` result shape (verified live + against
+// `herdr api schema`): { id: "cli:workspace:create", result: { workspace: {
+// workspace_id: "wB", ... }, root_pane: { pane_id: "wB:p1", ... } } }.
+// The top-level `id` is the COMMAND id, not the workspace id — never read it.
 export function extractWorkspaceId(response) {
   return (
-    response?.workspace?.id ||
+    response?.result?.workspace?.workspace_id ||
+    response?.workspace?.workspace_id ||
     response?.result?.workspace?.id ||
-    response?.id ||
+    response?.workspace?.id ||
     response?.workspace_id ||
     undefined
   );
+}
+
+// `worktree create --json` returns the new worktree's checkout path at
+// result.workspace.worktree.checkout_path; result.root_pane.cwd is the same
+// path and serves as a fallback.
+export function extractWorktreePath(response, { dryRun = false, name } = {}) {
+  return (
+    response?.result?.workspace?.worktree?.checkout_path ||
+    response?.workspace?.worktree?.checkout_path ||
+    response?.result?.root_pane?.cwd ||
+    response?.result?.worktree?.path ||
+    response?.worktree?.path ||
+    (dryRun ? `dry-run-worktree/${name}` : undefined)
+  );
+}
+
+export function extractRootPaneId(response) {
+  return response?.result?.root_pane?.pane_id || response?.root_pane?.pane_id || undefined;
+}
+
+export function extractAgentPaneId(response) {
+  return response?.result?.agent?.pane_id || response?.agent?.pane_id || undefined;
 }

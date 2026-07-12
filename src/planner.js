@@ -89,7 +89,30 @@ function parseTaskMetadata(body, { defaultAgent, index }) {
   };
 }
 
-export function buildWorkerPrompt({ task, workerName, goal, preamble }) {
+export function normalizeTask(spec = {}, { defaultAgent = "kiro", index = 1 } = {}) {
+  const task = String(spec.task || "").trim();
+  if (!task) throw new Error('Task spec requires a non-empty "task".');
+  return {
+    name: spec.name || `worker-${index}`,
+    agent: spec.agent || defaultAgent,
+    profile: spec.profile,
+    cwd: spec.cwd,
+    task,
+    constraints: spec.constraints,
+    expectedArtifacts: spec.expectedArtifacts,
+    statusPolicy: spec.statusPolicy,
+    isolation: spec.isolation,
+  };
+}
+
+export function buildWorkerPrompt({ task, workerName, goal, preamble, constraints, expectedArtifacts }) {
+  const extraRules = Array.isArray(constraints)
+    ? constraints.filter(Boolean).map((rule) => `- ${rule}`)
+    : [];
+  const artifacts =
+    Array.isArray(expectedArtifacts) && expectedArtifacts.filter(Boolean).length
+      ? ["", "Expected artifacts:", ...expectedArtifacts.filter(Boolean).map((item) => `- ${item}`)]
+      : [];
   return [
     preamble,
     "",
@@ -104,7 +127,9 @@ export function buildWorkerPrompt({ task, workerName, goal, preamble }) {
     "- Keep the work scoped to this assignment.",
     "- If blocked, state the exact blocker and what input is needed.",
     "- Finish with: changed files, checks run, status, and next recommended step.",
+    ...extraRules,
+    ...artifacts,
   ]
-    .filter(Boolean)
+    .filter((line) => line !== null)
     .join("\n");
 }
