@@ -1,3 +1,6 @@
+import { writeFile, readFile, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   HerdrCli,
   extractWorkspaceId,
@@ -5,7 +8,7 @@ import {
   extractRootPaneId,
   extractAgentPaneId,
 } from "./herdr.js";
-import { commandForAgent, getAgentProfile } from "./agents.js";
+import { commandForAgent, headlessCommandForAgent, getAgentProfile } from "./agents.js";
 import { buildWorkerPrompt, normalizeTask } from "./planner.js";
 
 export function createDroverRuntime(config = {}) {
@@ -22,6 +25,7 @@ export function createDroverRuntime(config = {}) {
     agentCommand,
     workspaceId,
     workspaceLabel,
+    execMode = "interactive",
   } = config;
 
   const registry = new Map();
@@ -29,6 +33,7 @@ export function createDroverRuntime(config = {}) {
   let workspacePromise = null;
   let rootPaneId;
   let bootstrapClosed = false;
+  let headlessDir;
 
   async function ensureWorkspace() {
     if (workspace) return workspace;
@@ -56,6 +61,24 @@ export function createDroverRuntime(config = {}) {
     return name;
   }
 
+  // Build the headless worker command: run the agent non-interactively with the
+  // prompt on stdin, capture output to a file, then echo a unique completion
+  // marker to the pane and keep the pane alive so the supervisor can observe
+  // (via `wait output --match`), collect the output file, and release the pane.
+  async function prepareHeadless({ workerName, profile, profileName, prompt }) {
+    const agentArgv = headlessCommandForAgent(profile, agentCommand, profileName);
+    if (!headlessDir) headlessDir = await mkdtemp(join(tmpdir(), "drover-"));
+    const promptFile = join(headlessDir, `${workerName}.prompt`);
+    const outFile = join(headlessDir, `${workerName}.out`);
+    const doneMarker = `__DROVER_DONE_${workerName}__`;
+    await writeFile(promptFile, prompt);
+    const agentCmd = agentArgv.map(shellQuote).join(" ");
+    const script =
+      `${agentCmd} < ${shellQuote(promptFile)} > ${shellQuote(outFile)} 2>&1; ` +
+      `printf '%s exit=%s\\n' ${shellQuote(doneMarker)} "$?"; sleep 86400`;
+    return { command: ["bash", "-lc", script], outFile, doneMarker, promptFile };
+  }
+
   async function delegate(spec) {
     const normalized = normalizeTask(spec, { defaultAgent, index: registry.size + 1 });
     const profile = getAgentProfile(normalized.agent);
@@ -75,13 +98,35 @@ export function createDroverRuntime(config = {}) {
     }
 
     const profileName = normalized.profile || agentProfile || profile.defaultProfile;
-    const command = commandForAgent(profile, agentCommand, profileName);
+    const mode = spec.mode || execMode;
     const env = {
       HERDR_AGENT: profile.herdrAgentHint,
       DROVER_WORKER_NAME: workerName,
       DROVER_AGENT: profile.id,
+      DROVER_MODE: mode,
     };
     if (profileName) env.DROVER_AGENT_PROFILE = profileName;
+
+    const prompt = buildWorkerPrompt({
+      task: normalized.task,
+      workerName,
+      goal,
+      preamble: profile.promptPreamble,
+      constraints: normalized.constraints,
+      expectedArtifacts: normalized.expectedArtifacts,
+    });
+
+    // Headless mode runs the agent non-interactively (prompt on stdin, output to
+    // a file, a unique completion marker echoed to the pane) — no interactive
+    // TUI to bootstrap or submit into. Interactive mode keeps the send flow.
+    let command;
+    let headless;
+    if (mode === "headless") {
+      headless = await prepareHeadless({ workerName, profile, profileName, prompt });
+      command = headless.command;
+    } else {
+      command = commandForAgent(profile, agentCommand, profileName);
+    }
 
     const startResult = await herdr.startAgent({
       name: workerName,
@@ -92,6 +137,7 @@ export function createDroverRuntime(config = {}) {
       env,
       focus: isFirst,
     });
+    const paneId = extractAgentPaneId(startResult);
 
     // Close the bootstrap shell pane herdr spawns with a fresh workspace, so the
     // run leaves only real worker panes. Only when this runtime created the ws.
@@ -100,25 +146,22 @@ export function createDroverRuntime(config = {}) {
       await herdr.closePane(rootPaneId);
     }
 
-    const prompt = buildWorkerPrompt({
-      task: normalized.task,
-      workerName,
-      goal,
-      preamble: profile.promptPreamble,
-      constraints: normalized.constraints,
-      expectedArtifacts: normalized.expectedArtifacts,
-    });
-    await herdr.sendAgent(workerName, prompt);
+    if (mode !== "headless") {
+      await herdr.sendAgent(workerName, prompt);
+    }
 
     registry.set(workerName, {
       id: workerName,
       workerName,
-      paneId: extractAgentPaneId(startResult),
+      paneId,
       agent: profile.id,
       profile: profileName,
       task: normalized.task,
       isolation: normalized.isolation,
       worktree,
+      mode,
+      outFile: headless?.outFile,
+      doneMarker: headless?.doneMarker,
       statusPolicy: normalized.statusPolicy,
       startResult,
       stopped: false,
@@ -153,8 +196,8 @@ export function createDroverRuntime(config = {}) {
         const status = record?.statusPolicy?.waitFor || "done";
         const timeoutMs = record?.statusPolicy?.timeoutMs || waitTimeoutMs;
         try {
-          // `wait agent-status` targets a pane id, not an agent name (herdr 0.7.2).
-          const waitResult = await herdr.waitAgent(record?.paneId || item.workerName, { status, timeoutMs });
+          // observe() routes headless (wait output) vs interactive (agent-status).
+          const waitResult = await observe(item.workerName, { status, timeoutMs });
           waits.push({ workerName: item.workerName, status: "done", waitResult });
         } catch (error) {
           waits.push({ workerName: item.workerName, status: "not_done", error: error.message });
@@ -173,12 +216,26 @@ export function createDroverRuntime(config = {}) {
 
   async function observe(id, { status = "done", timeoutMs = waitTimeoutMs } = {}) {
     const record = requireRecord(id);
-    // `wait agent-status` targets a pane id, not an agent name (herdr 0.7.2).
+    // Headless workers signal completion by echoing a marker to their pane;
+    // interactive workers transition herdr agent-status (targeted by pane id).
+    if (record.mode === "headless") {
+      return herdr.waitOutput(record.paneId, { match: record.doneMarker, timeoutMs });
+    }
     return herdr.waitAgent(record.paneId || record.workerName, { status, timeoutMs });
   }
 
   async function collect(id, { source, lines } = {}) {
     const record = requireRecord(id);
+    // Headless workers capture their output to a file (no flaky TUI scraping).
+    if (record.mode === "headless") {
+      let output = "";
+      try {
+        output = await readFile(record.outFile, "utf8");
+      } catch {
+        output = "";
+      }
+      return { id, workerName: record.workerName, agent: record.agent, output };
+    }
     const result = await herdr.readAgent(record.workerName, { source, lines });
     const output = result && typeof result.stdout === "string" ? result.stdout : result;
     return { id, workerName: record.workerName, agent: record.agent, output };
@@ -194,17 +251,26 @@ export function createDroverRuntime(config = {}) {
   }
 
   async function close({ closeWorkspace: shouldClose = false } = {}) {
+    // Closing the workspace tears down all of its panes in one call, so don't
+    // also close panes individually (closing the last pane auto-closes the
+    // workspace, and the follow-up `workspace close` would 404).
+    if (shouldClose && workspace?.created && workspace.workspaceId) {
+      for (const record of registry.values()) record.stopped = true;
+      let workspaceResult;
+      try {
+        workspaceResult = await herdr.closeWorkspace(workspace.workspaceId);
+      } catch (error) {
+        workspaceResult = { error: error.message };
+      }
+      return { closed: true, workspaceResult };
+    }
     for (const record of registry.values()) {
       if (!record.stopped) {
         if (record.paneId) await herdr.closePane(record.paneId);
         record.stopped = true;
       }
     }
-    let workspaceResult;
-    if (shouldClose && workspace?.created && workspace.workspaceId) {
-      workspaceResult = await herdr.closeWorkspace(workspace.workspaceId);
-    }
-    return { closed: shouldClose, workspaceResult };
+    return { closed: false };
   }
 
   function workers() {
@@ -235,6 +301,10 @@ export function createDroverRuntime(config = {}) {
       return workspace;
     },
   };
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 function safeWorkerName(value) {

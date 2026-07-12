@@ -156,6 +156,9 @@ function makeFakeHerdr(responses = {}) {
     async waitAgent(target, opts) {
       return this._push("waitAgent", [target, opts], responses.waitAgent ?? { status: "done" });
     },
+    async waitOutput(paneId, opts) {
+      return this._push("waitOutput", [paneId, opts], responses.waitOutput ?? { matched: true });
+    },
     async readAgent(target, opts) {
       return this._push("readAgent", [target, opts], responses.readAgent ?? { stdout: "worker output" });
     },
@@ -319,4 +322,54 @@ test("runDelegation preserves legacy shape and notifies", async () => {
 
 test("runDelegation throws on empty task list", async () => {
   await assert.rejects(() => runDelegation({ herdr: makeFakeHerdr(), tasks: [], options: {} }), /No tasks/);
+});
+
+test("headless mode launches a non-interactive wrapper and does not send a prompt", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hl", execMode: "headless" });
+  const w = await drover.delegate({ name: "worker", agent: "claude", task: "do the thing" });
+
+  // No interactive prompt submission in headless mode.
+  assert.equal(only(herdr, "sendAgent").length, 0);
+
+  const start = only(herdr, "startAgent")[0].args[0];
+  assert.deepEqual(start.command.slice(0, 2), ["bash", "-lc"]);
+  const script = start.command[2];
+  // agent argv tokens are shell-quoted; assert their presence, not adjacency.
+  for (const tok of ["claude", "-p", "--dangerously-skip-permissions"]) assert.ok(script.includes(tok), tok);
+  assert.match(script, /__DROVER_DONE_hl-worker__/);
+  assert.match(script, /\.prompt/);
+  assert.match(script, /\.out/);
+  assert.match(script, /sleep 86400/);
+  assert.equal(w.agent, "claude");
+});
+
+test("headless observe waits on the completion marker; collect reads the output file", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "hl", execMode: "headless" });
+  const w = await drover.delegate({ name: "worker", agent: "claude", task: "x" });
+
+  await drover.observe(w.id, { timeoutMs: 1000 });
+  assert.equal(only(herdr, "waitAgent").length, 0, "headless must not use agent-status");
+  const wo = only(herdr, "waitOutput")[0];
+  assert.equal(wo.args[0], "ws-1:p2"); // the worker's own pane (p1 is the bootstrap)
+  assert.equal(wo.args[1].match, "__DROVER_DONE_hl-worker__");
+
+  // The wrapper (which would write the .out file) never runs under the fake,
+  // so collect returns an empty string rather than scraping the pane.
+  const collected = await drover.collect(w.id);
+  assert.equal(collected.output, "");
+  assert.equal(only(herdr, "readAgent").length, 0, "headless collect must not read the pane");
+});
+
+test("per-spec mode overrides the runtime default", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "mx", execMode: "interactive" });
+  await drover.delegate({ name: "a", agent: "kiro", task: "interactive one" });
+  await drover.delegate({ name: "b", agent: "claude", task: "headless one", mode: "headless" });
+
+  assert.equal(only(herdr, "sendAgent").length, 1); // only the interactive worker submitted a prompt
+  const starts = only(herdr, "startAgent");
+  assert.deepEqual(starts[0].args[0].command, ["kiro-cli", "chat", "--agent", "developer"]);
+  assert.deepEqual(starts[1].args[0].command.slice(0, 2), ["bash", "-lc"]);
 });

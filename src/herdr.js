@@ -82,6 +82,14 @@ export class HerdrCli {
     return this.run(["wait", "agent-status", target, "--status", status, "--timeout", String(timeoutMs)]);
   }
 
+  waitOutput(paneId, { match, timeoutMs = 1_800_000, source, lines, regex = false } = {}) {
+    const args = ["wait", "output", paneId, "--match", match, "--timeout", String(timeoutMs)];
+    if (source) args.push("--source", source);
+    if (lines) args.push("--lines", String(lines));
+    if (regex) args.push("--regex");
+    return this.run(args);
+  }
+
   notify(title, body) {
     const args = ["notification", "show", title];
     if (body) args.push("--body", body);
