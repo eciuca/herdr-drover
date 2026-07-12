@@ -62,3 +62,36 @@ test("buildWorkerPrompt appends constraints and expected artifacts", () => {
   assert.ok(prompt.includes("- no unrelated edits"));
   assert.ok(prompt.includes("Expected artifacts:\n- changed files\n- status summary"));
 });
+
+import {
+  HerdrCli,
+  extractWorktreePath,
+  extractRootPaneId,
+  extractAgentPaneId,
+} from "../src/herdr.js";
+
+test("HerdrCli teardown + worktree verbs generate expected commands (dry-run)", async () => {
+  const herdr = new HerdrCli({ dryRun: true });
+  await herdr.closePane("wA:p1");
+  await herdr.closeWorkspace("ws-1");
+  await herdr.createWorktree({ cwd: "/repo", branch: "drover/builder" });
+  assert.deepEqual(herdr.commands, [
+    ["herdr", "pane", "close", "wA:p1"],
+    ["herdr", "workspace", "close", "ws-1"],
+    ["herdr", "worktree", "create", "--cwd", "/repo", "--branch", "drover/builder", "--json"],
+  ]);
+});
+
+test("extractWorktreePath reads nested path or falls back to dry-run stub", () => {
+  assert.equal(extractWorktreePath({ result: { worktree: { path: "/wt/a" } } }), "/wt/a");
+  assert.equal(extractWorktreePath({ path: "/wt/b" }), "/wt/b");
+  assert.equal(extractWorktreePath({}, { dryRun: true, name: "c" }), "dry-run-worktree/c");
+  assert.equal(extractWorktreePath({}, {}), undefined);
+});
+
+test("extractRootPaneId and extractAgentPaneId read herdr result shapes", () => {
+  assert.equal(extractRootPaneId({ result: { root_pane: { pane_id: "wA:p1" } } }), "wA:p1");
+  assert.equal(extractRootPaneId({}), undefined);
+  assert.equal(extractAgentPaneId({ result: { agent: { pane_id: "wA:p2" } } }), "wA:p2");
+  assert.equal(extractAgentPaneId({}), undefined);
+});

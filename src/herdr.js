@@ -84,6 +84,26 @@ export class HerdrCli {
     args.push("--sound", "done");
     return this.run(args);
   }
+
+  closePane(paneId) {
+    return this.run(["pane", "close", paneId]);
+  }
+
+  closeWorkspace(workspaceId) {
+    return this.run(["workspace", "close", workspaceId]);
+  }
+
+  createWorktree({ workspace, cwd, branch, base, path, label } = {}) {
+    const args = ["worktree", "create"];
+    if (workspace) args.push("--workspace", workspace);
+    else if (cwd) args.push("--cwd", cwd);
+    if (branch) args.push("--branch", branch);
+    if (base) args.push("--base", base);
+    if (path) args.push("--path", path);
+    if (label) args.push("--label", label);
+    args.push("--json");
+    return this.run(args);
+  }
 }
 
 export function extractWorkspaceId(response) {
@@ -94,4 +114,22 @@ export function extractWorkspaceId(response) {
     response?.workspace_id ||
     undefined
   );
+}
+
+export function extractWorktreePath(response, { dryRun = false, name } = {}) {
+  return (
+    response?.result?.worktree?.path ||
+    response?.worktree?.path ||
+    response?.result?.path ||
+    response?.path ||
+    (dryRun ? `dry-run-worktree/${name}` : undefined)
+  );
+}
+
+export function extractRootPaneId(response) {
+  return response?.result?.root_pane?.pane_id || response?.root_pane?.pane_id || undefined;
+}
+
+export function extractAgentPaneId(response) {
+  return response?.result?.agent?.pane_id || response?.agent?.pane_id || undefined;
 }
