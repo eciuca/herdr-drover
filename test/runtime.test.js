@@ -373,3 +373,101 @@ test("per-spec mode overrides the runtime default", async () => {
   assert.deepEqual(starts[0].args[0].command, ["kiro-cli", "chat", "--agent", "developer"]);
   assert.deepEqual(starts[1].args[0].command.slice(0, 2), ["bash", "-lc"]);
 });
+
+// Make startAgent yield no pane id (extractAgentPaneId({}) === undefined) so the
+// worker record has paneId === undefined and the pane-close path is a no-op.
+function makePanelessHerdr() {
+  const herdr = makeFakeHerdr();
+  herdr.startAgent = async function (opts) {
+    this.commands.push(["agent", "start", opts.name]);
+    return this._push("startAgent", [opts], {}); // no pane id
+  };
+  return herdr;
+}
+
+function captureWarn(fn) {
+  const original = console.warn;
+  const messages = [];
+  console.warn = (...args) => messages.push(args.join(" "));
+  try {
+    return fn(messages);
+  } finally {
+    console.warn = original;
+  }
+}
+
+test("release warns once when a live worker has no pane id", async () => {
+  const herdr = makePanelessHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "np" });
+  const handle = await drover.delegate({ name: "a", agent: "kiro", task: "x" });
+
+  const messages = await captureWarn(async (msgs) => {
+    await drover.release(handle.id);
+    return msgs;
+  });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /worker "np-a" has no pane id/);
+});
+
+test("close (non-workspace path) warns when a live worker has no pane id", async () => {
+  const herdr = makePanelessHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "np" });
+  await drover.delegate({ name: "a", agent: "kiro", task: "x" });
+
+  const messages = await captureWarn(async (msgs) => {
+    await drover.close(); // cleanup defaults to "keep" → non-workspace path
+    return msgs;
+  });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /worker "np-a" has no pane id/);
+});
+
+test("missing pane id never warns in dry-run mode", async () => {
+  const herdr = makePanelessHerdr();
+  herdr.dryRun = true;
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "np" });
+  const handle = await drover.delegate({ name: "a", agent: "kiro", task: "x" });
+
+  const messages = await captureWarn(async (msgs) => {
+    await drover.release(handle.id);
+    await drover.delegate({ name: "b", agent: "kiro", task: "y" });
+    await drover.close();
+    return msgs;
+  });
+  assert.equal(messages.length, 0);
+});
+
+test("cleanup:'close' closes the workspace when closeWorkspace is omitted", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "cl", cleanup: "close" });
+  await drover.delegate({ name: "a", agent: "kiro", task: "x" });
+
+  const result = await drover.close();
+  assert.equal(result.closed, true);
+  assert.equal(only(herdr, "closeWorkspace")[0].args[0], "ws-1");
+});
+
+test("default cleanup:'keep' does not close the workspace when closeWorkspace is omitted", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "cl" });
+  await drover.delegate({ name: "a", agent: "kiro", task: "x" });
+
+  const result = await drover.close();
+  assert.equal(result.closed, false);
+  assert.equal(only(herdr, "closeWorkspace").length, 0);
+});
+
+test("explicit closeWorkspace arg overrides the cleanup setting", async () => {
+  const closeHerdr = makeFakeHerdr();
+  const closeDrover = createDroverRuntime({ herdr: closeHerdr, cwd: "/repo", namePrefix: "cl", cleanup: "keep" });
+  await closeDrover.delegate({ name: "a", agent: "kiro", task: "x" });
+  await closeDrover.close({ closeWorkspace: true });
+  assert.equal(only(closeHerdr, "closeWorkspace").length, 1, "closeWorkspace:true overrides keep");
+
+  const keepHerdr = makeFakeHerdr();
+  const keepDrover = createDroverRuntime({ herdr: keepHerdr, cwd: "/repo", namePrefix: "cl", cleanup: "close" });
+  await keepDrover.delegate({ name: "a", agent: "kiro", task: "x" });
+  const result = await keepDrover.close({ closeWorkspace: false });
+  assert.equal(result.closed, false, "closeWorkspace:false overrides close");
+  assert.equal(only(keepHerdr, "closeWorkspace").length, 0);
+});

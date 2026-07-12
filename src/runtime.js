@@ -79,6 +79,11 @@ export function createDroverRuntime(config = {}) {
     return { command: ["bash", "-lc", script], outFile, doneMarker, promptFile };
   }
 
+  // NOTE: delegate mutates shared runtime state — the worker registry, the
+  // lazily-bootstrapped workspace, and the bootstrap-pane-close latch
+  // (bootstrapClosed). It MUST be awaited serially; callers must not invoke it
+  // concurrently (e.g. Promise.all), or registry naming, the "first worker"
+  // bootstrap, and the close latch race. Use delegateMany or sequential awaits.
   async function delegate(spec) {
     const normalized = normalizeTask(spec, { defaultAgent, index: registry.size + 1 });
     const profile = getAgentProfile(normalized.agent);
@@ -241,16 +246,30 @@ export function createDroverRuntime(config = {}) {
     return { id, workerName: record.workerName, agent: record.agent, output };
   }
 
+  // Surface a silent no-op: a live (non-dry-run) worker without a pane id can't
+  // be closed via herdr.closePane. Never warn in dry-run mode (no real panes).
+  function warnMissingPane(record) {
+    if (herdr.dryRun === false) {
+      console.warn(`Drover: worker "${record.workerName}" has no pane id; cannot close its pane.`);
+    }
+  }
+
   async function release(id) {
     const record = requireRecord(id);
     if (record.stopped) return { id, workerName: record.workerName, stopped: true };
     let result;
     if (record.paneId) result = await herdr.closePane(record.paneId);
+    else warnMissingPane(record);
     record.stopped = true;
     return { id, workerName: record.workerName, result };
   }
 
-  async function close({ closeWorkspace: shouldClose = false } = {}) {
+  async function close({ closeWorkspace } = {}) {
+    // When closeWorkspace is an explicit boolean, honor it; when omitted, fall
+    // back to the `cleanup` config ("close" tears down the workspace, "keep"
+    // leaves it running).
+    const shouldClose =
+      typeof closeWorkspace === "boolean" ? closeWorkspace : cleanup === "close";
     // Closing the workspace tears down all of its panes in one call, so don't
     // also close panes individually (closing the last pane auto-closes the
     // workspace, and the follow-up `workspace close` would 404).
@@ -267,6 +286,7 @@ export function createDroverRuntime(config = {}) {
     for (const record of registry.values()) {
       if (!record.stopped) {
         if (record.paneId) await herdr.closePane(record.paneId);
+        else warnMissingPane(record);
         record.stopped = true;
       }
     }
