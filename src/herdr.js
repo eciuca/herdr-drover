@@ -49,7 +49,8 @@ export class HerdrCli {
     if (label) args.push("--label", label);
     for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
     args.push(focus ? "--focus" : "--no-focus");
-    args.push("--json");
+    // NOTE: `workspace create` emits JSON by default and rejects `--json`
+    // ("unknown option") on herdr 0.7.2. Do not add it here.
     return this.run(args);
   }
 
@@ -61,7 +62,8 @@ export class HerdrCli {
     if (split) args.push("--split", split);
     for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
     args.push(focus ? "--focus" : "--no-focus");
-    args.push("--json");
+    // NOTE: `agent start` emits JSON by default and rejects `--json` on herdr
+    // 0.7.2. Everything after `--` is the worker argv, so no flag may follow.
     args.push("--", ...command);
     return this.run(args);
   }
@@ -108,22 +110,31 @@ export class HerdrCli {
   }
 }
 
+// herdr 0.7.2 `workspace create` result shape (verified live + against
+// `herdr api schema`): { id: "cli:workspace:create", result: { workspace: {
+// workspace_id: "wB", ... }, root_pane: { pane_id: "wB:p1", ... } } }.
+// The top-level `id` is the COMMAND id, not the workspace id — never read it.
 export function extractWorkspaceId(response) {
   return (
-    response?.workspace?.id ||
+    response?.result?.workspace?.workspace_id ||
+    response?.workspace?.workspace_id ||
     response?.result?.workspace?.id ||
-    response?.id ||
+    response?.workspace?.id ||
     response?.workspace_id ||
     undefined
   );
 }
 
+// `worktree create --json` returns the new worktree's checkout path at
+// result.workspace.worktree.checkout_path; result.root_pane.cwd is the same
+// path and serves as a fallback.
 export function extractWorktreePath(response, { dryRun = false, name } = {}) {
   return (
+    response?.result?.workspace?.worktree?.checkout_path ||
+    response?.workspace?.worktree?.checkout_path ||
+    response?.result?.root_pane?.cwd ||
     response?.result?.worktree?.path ||
     response?.worktree?.path ||
-    response?.result?.path ||
-    response?.path ||
     (dryRun ? `dry-run-worktree/${name}` : undefined)
   );
 }

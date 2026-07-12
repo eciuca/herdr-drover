@@ -153,7 +153,8 @@ export function createDroverRuntime(config = {}) {
         const status = record?.statusPolicy?.waitFor || "done";
         const timeoutMs = record?.statusPolicy?.timeoutMs || waitTimeoutMs;
         try {
-          const waitResult = await herdr.waitAgent(item.workerName, { status, timeoutMs });
+          // `wait agent-status` targets a pane id, not an agent name (herdr 0.7.2).
+          const waitResult = await herdr.waitAgent(record?.paneId || item.workerName, { status, timeoutMs });
           waits.push({ workerName: item.workerName, status: "done", waitResult });
         } catch (error) {
           waits.push({ workerName: item.workerName, status: "not_done", error: error.message });
@@ -172,7 +173,8 @@ export function createDroverRuntime(config = {}) {
 
   async function observe(id, { status = "done", timeoutMs = waitTimeoutMs } = {}) {
     const record = requireRecord(id);
-    return herdr.waitAgent(record.workerName, { status, timeoutMs });
+    // `wait agent-status` targets a pane id, not an agent name (herdr 0.7.2).
+    return herdr.waitAgent(record.paneId || record.workerName, { status, timeoutMs });
   }
 
   async function collect(id, { source, lines } = {}) {

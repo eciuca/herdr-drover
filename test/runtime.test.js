@@ -65,6 +65,7 @@ test("buildWorkerPrompt appends constraints and expected artifacts", () => {
 
 import {
   HerdrCli,
+  extractWorkspaceId,
   extractWorktreePath,
   extractRootPaneId,
   extractAgentPaneId,
@@ -82,23 +83,31 @@ test("HerdrCli teardown + worktree verbs generate expected commands (dry-run)", 
   ]);
 });
 
-test("createWorkspace and startAgent request --json for pane-id extraction", async () => {
+test("createWorkspace and startAgent omit --json (herdr 0.7.2 rejects it); worktree keeps it", async () => {
   const herdr = new HerdrCli({ dryRun: true });
   await herdr.createWorkspace({ cwd: "/repo", label: "x" });
   await herdr.startAgent({ name: "w", command: ["kiro-cli", "chat"], workspaceId: "ws-1" });
+  await herdr.createWorktree({ cwd: "/repo", branch: "b" });
 
-  const [workspaceCmd, startCmd] = herdr.commands;
-  assert.ok(workspaceCmd.includes("--json"));
-
-  assert.ok(startCmd.includes("--json"));
-  const jsonIndex = startCmd.indexOf("--json");
-  const separatorIndex = startCmd.indexOf("--");
-  assert.ok(jsonIndex < separatorIndex, "--json must precede the -- command separator");
+  const [workspaceCmd, startCmd, worktreeCmd] = herdr.commands;
+  assert.ok(!workspaceCmd.includes("--json"), "workspace create must not send --json");
+  assert.ok(!startCmd.includes("--json"), "agent start must not send --json");
+  assert.ok(worktreeCmd.includes("--json"), "worktree create keeps --json");
 });
 
-test("extractWorktreePath reads nested path or falls back to dry-run stub", () => {
-  assert.equal(extractWorktreePath({ result: { worktree: { path: "/wt/a" } } }), "/wt/a");
-  assert.equal(extractWorktreePath({ path: "/wt/b" }), "/wt/b");
+test("extractWorkspaceId reads result.workspace.workspace_id, never the command id", () => {
+  // Real herdr shape: top-level `id` is the command id, not the workspace id.
+  const live = { id: "cli:workspace:create", result: { workspace: { workspace_id: "wB" } } };
+  assert.equal(extractWorkspaceId(live), "wB");
+  assert.equal(extractWorkspaceId({}), undefined);
+});
+
+test("extractWorktreePath reads the live worktree-create shape or falls back to dry-run stub", () => {
+  assert.equal(
+    extractWorktreePath({ result: { workspace: { worktree: { checkout_path: "/wt/a" } } } }),
+    "/wt/a",
+  );
+  assert.equal(extractWorktreePath({ result: { root_pane: { cwd: "/wt/b" } } }), "/wt/b");
   assert.equal(extractWorktreePath({}, { dryRun: true, name: "c" }), "dry-run-worktree/c");
   assert.equal(extractWorktreePath({}, {}), undefined);
 });
@@ -127,7 +136,8 @@ function makeFakeHerdr(responses = {}) {
       return this._push(
         "createWorkspace",
         [opts],
-        responses.createWorkspace ?? { result: { workspace: { id: "ws-1" }, root_pane: { pane_id: "ws-1:p1" } } },
+        responses.createWorkspace ??
+          { result: { workspace: { workspace_id: "ws-1" }, root_pane: { pane_id: "ws-1:p1" } } },
       );
     },
     async startAgent(opts) {
@@ -156,7 +166,8 @@ function makeFakeHerdr(responses = {}) {
       return this._push(
         "createWorktree",
         [opts],
-        responses.createWorktree ?? { result: { worktree: { path: `/wt/${opts.branch}` } } },
+        responses.createWorktree ??
+          { result: { workspace: { worktree: { checkout_path: `/wt/${opts.branch}` } } } },
       );
     },
     async notify(...args) {
