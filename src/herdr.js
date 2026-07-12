@@ -16,7 +16,7 @@ export class HerdrCli {
     return this.session ? ["--session", this.session] : [];
   }
 
-  async run(args, { parseJson = true, input } = {}) {
+  async run(args, { parseJson = true, input, execTimeoutMs } = {}) {
     const fullArgs = [...this.baseArgs(), ...args];
     this.commands.push([this.bin, ...fullArgs]);
     if (this.dryRun) {
@@ -25,7 +25,9 @@ export class HerdrCli {
 
     const { stdout, stderr } = await execFileAsync(this.bin, fullArgs, {
       input,
-      timeout: this.timeoutMs,
+      // Blocking calls (wait ...) set their own budget; the default guards
+      // quick commands. A 0 disables the child timeout entirely.
+      timeout: execTimeoutMs ?? this.timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -79,7 +81,11 @@ export class HerdrCli {
   }
 
   waitAgent(target, { status = "done", timeoutMs = 1_800_000 } = {}) {
-    return this.run(["wait", "agent-status", target, "--status", status, "--timeout", String(timeoutMs)]);
+    // Give the child process longer than herdr's own --timeout so herdr returns
+    // its clean timeout error before Node's execFile would kill it.
+    return this.run(["wait", "agent-status", target, "--status", status, "--timeout", String(timeoutMs)], {
+      execTimeoutMs: timeoutMs + 15_000,
+    });
   }
 
   waitOutput(paneId, { match, timeoutMs = 1_800_000, source, lines, regex = false } = {}) {
@@ -87,7 +93,7 @@ export class HerdrCli {
     if (source) args.push("--source", source);
     if (lines) args.push("--lines", String(lines));
     if (regex) args.push("--regex");
-    return this.run(args);
+    return this.run(args, { execTimeoutMs: timeoutMs + 15_000 });
   }
 
   notify(title, body) {
