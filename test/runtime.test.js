@@ -82,6 +82,20 @@ test("HerdrCli teardown + worktree verbs generate expected commands (dry-run)", 
   ]);
 });
 
+test("createWorkspace and startAgent request --json for pane-id extraction", async () => {
+  const herdr = new HerdrCli({ dryRun: true });
+  await herdr.createWorkspace({ cwd: "/repo", label: "x" });
+  await herdr.startAgent({ name: "w", command: ["kiro-cli", "chat"], workspaceId: "ws-1" });
+
+  const [workspaceCmd, startCmd] = herdr.commands;
+  assert.ok(workspaceCmd.includes("--json"));
+
+  assert.ok(startCmd.includes("--json"));
+  const jsonIndex = startCmd.indexOf("--json");
+  const separatorIndex = startCmd.indexOf("--");
+  assert.ok(jsonIndex < separatorIndex, "--json must precede the -- command separator");
+});
+
 test("extractWorktreePath reads nested path or falls back to dry-run stub", () => {
   assert.equal(extractWorktreePath({ result: { worktree: { path: "/wt/a" } } }), "/wt/a");
   assert.equal(extractWorktreePath({ path: "/wt/b" }), "/wt/b");

@@ -49,6 +49,7 @@ export class HerdrCli {
     if (label) args.push("--label", label);
     for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
     args.push(focus ? "--focus" : "--no-focus");
+    args.push("--json");
     return this.run(args);
   }
 
@@ -60,6 +61,7 @@ export class HerdrCli {
     if (split) args.push("--split", split);
     for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
     args.push(focus ? "--focus" : "--no-focus");
+    args.push("--json");
     args.push("--", ...command);
     return this.run(args);
   }
