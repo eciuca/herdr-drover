@@ -15,7 +15,8 @@
 - Test runner is `node --test` (`npm test`); assertions via `node:assert/strict`.
 - Existing suite `test/planner.test.js` must stay green — do NOT change `parseTaskList` or `splitInlineTask` behaviour.
 - `src/cli.js` must remain unchanged; `runDelegation({ herdr, tasks, options })` must keep returning `{ workspace, launched, waits, commands }`.
-- Herdr teardown/worktree verb strings (`agent stop`, `workspace close`, `worktree create`) are ASSUMED — validated only structurally via dry-run/fake tests. Do not claim they work against a live Herdr.
+- Herdr verbs are CONFIRMED against live herdr 0.7.2: stop a worker with `herdr pane close <pane_id>` (there is NO `agent stop`); `herdr workspace close <id>`; `herdr worktree create [--workspace ID|--cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--json]` (NO positional name); `herdr wait agent-status <t> --status done`. Tests assert the generated command arrays.
+- `herdr workspace create` always spawns a bootstrap shell pane; the facade closes it after launching the first worker so a run leaves no orphan shell.
 - Kiro is the primary profile: `kiro` → `kiro-cli chat --agent developer`. Example, skill, and tests must exercise kiro.
 - Commit after every task.
 
@@ -23,7 +24,7 @@
 
 - Create `src/runtime.js` — the facade (`createDroverRuntime`, private `safeWorkerName`).
 - Modify `src/planner.js` — add `normalizeTask`, extend `buildWorkerPrompt`.
-- Modify `src/herdr.js` — add `stopAgent`, `closeWorkspace`, `createWorktree`, `extractWorktreePath`.
+- Modify `src/herdr.js` — add `closePane`, `closeWorkspace`, `createWorktree`, `extractWorktreePath`, `extractRootPaneId`, `extractAgentPaneId`.
 - Modify `src/orchestrator.js` — rewrite `runDelegation` over the facade.
 - Create `examples/supervisor-adapter.mjs` — runnable kiro plan→build→review hand-off demo.
 - Create `test/runtime.test.js` — facade + normalization + prompt tests.
@@ -195,68 +196,90 @@ git commit -m "feat: add normalizeTask and constraint-aware buildWorkerPrompt"
 
 ### Task 2: Herdr teardown + worktree verbs (`src/herdr.js`)
 
+Verbs confirmed against live herdr 0.7.2. There is NO `agent stop` — a worker is
+stopped by closing its pane (`pane close <pane_id>`). `worktree create` takes NO
+positional name.
+
 **Files:**
-- Modify: `src/herdr.js` (add methods + `extractWorktreePath` export)
+- Modify: `src/herdr.js` (add methods + extraction helpers)
 - Test: `test/runtime.test.js` (append)
 
 **Interfaces:**
 - Produces (on `HerdrCli`):
-  - `stopAgent(target)` → runs `["agent", "stop", target]`
+  - `closePane(paneId)` → runs `["pane", "close", paneId]`
   - `closeWorkspace(workspaceId)` → runs `["workspace", "close", workspaceId]`
-  - `createWorktree({ name, cwd, branch, base })` → runs `["worktree", "create", name, ...flags]`
-- Produces (module export):
+  - `createWorktree({ workspace, cwd, branch, base, path, label })` → runs `["worktree", "create", ...flags, "--json"]`
+- Produces (module exports):
   - `extractWorktreePath(response, { dryRun, name })` → string path or `undefined`
+  - `extractRootPaneId(response)` → the bootstrap pane id from a `workspace create` result, or `undefined`
+  - `extractAgentPaneId(response)` → the pane id from an `agent start` result, or `undefined`
 
 - [ ] **Step 1: Write the failing tests**
 
 Append to `test/runtime.test.js`:
 
 ```js
-import { HerdrCli, extractWorktreePath } from "../src/herdr.js";
+import {
+  HerdrCli,
+  extractWorktreePath,
+  extractRootPaneId,
+  extractAgentPaneId,
+} from "../src/herdr.js";
 
 test("HerdrCli teardown + worktree verbs generate expected commands (dry-run)", async () => {
   const herdr = new HerdrCli({ dryRun: true });
-  await herdr.stopAgent("builder");
+  await herdr.closePane("wA:p1");
   await herdr.closeWorkspace("ws-1");
-  await herdr.createWorktree({ name: "builder", cwd: "/repo", branch: "drover/builder" });
+  await herdr.createWorktree({ cwd: "/repo", branch: "drover/builder" });
   assert.deepEqual(herdr.commands, [
-    ["herdr", "agent", "stop", "builder"],
+    ["herdr", "pane", "close", "wA:p1"],
     ["herdr", "workspace", "close", "ws-1"],
-    ["herdr", "worktree", "create", "builder", "--cwd", "/repo", "--branch", "drover/builder"],
+    ["herdr", "worktree", "create", "--cwd", "/repo", "--branch", "drover/builder", "--json"],
   ]);
 });
 
 test("extractWorktreePath reads nested path or falls back to dry-run stub", () => {
-  assert.equal(extractWorktreePath({ worktree: { path: "/wt/a" } }), "/wt/a");
+  assert.equal(extractWorktreePath({ result: { worktree: { path: "/wt/a" } } }), "/wt/a");
   assert.equal(extractWorktreePath({ path: "/wt/b" }), "/wt/b");
   assert.equal(extractWorktreePath({}, { dryRun: true, name: "c" }), "dry-run-worktree/c");
   assert.equal(extractWorktreePath({}, {}), undefined);
+});
+
+test("extractRootPaneId and extractAgentPaneId read herdr result shapes", () => {
+  assert.equal(extractRootPaneId({ result: { root_pane: { pane_id: "wA:p1" } } }), "wA:p1");
+  assert.equal(extractRootPaneId({}), undefined);
+  assert.equal(extractAgentPaneId({ result: { agent: { pane_id: "wA:p2" } } }), "wA:p2");
+  assert.equal(extractAgentPaneId({}), undefined);
 });
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `node --test test/runtime.test.js`
-Expected: FAIL — `herdr.stopAgent is not a function` / `extractWorktreePath is not exported`.
+Expected: FAIL — `herdr.closePane is not a function` / helpers not exported.
 
 - [ ] **Step 3: Add the methods to `HerdrCli`**
 
 In `src/herdr.js`, inside the `HerdrCli` class, add after the `notify` method:
 
 ```js
-  stopAgent(target) {
-    return this.run(["agent", "stop", target]);
+  closePane(paneId) {
+    return this.run(["pane", "close", paneId]);
   }
 
   closeWorkspace(workspaceId) {
     return this.run(["workspace", "close", workspaceId]);
   }
 
-  createWorktree({ name, cwd, branch, base } = {}) {
-    const args = ["worktree", "create", name];
-    if (cwd) args.push("--cwd", cwd);
+  createWorktree({ workspace, cwd, branch, base, path, label } = {}) {
+    const args = ["worktree", "create"];
+    if (workspace) args.push("--workspace", workspace);
+    else if (cwd) args.push("--cwd", cwd);
     if (branch) args.push("--branch", branch);
     if (base) args.push("--base", base);
+    if (path) args.push("--path", path);
+    if (label) args.push("--label", label);
+    args.push("--json");
     return this.run(args);
   }
 ```
@@ -266,12 +289,20 @@ At module scope (next to `extractWorkspaceId`), add:
 ```js
 export function extractWorktreePath(response, { dryRun = false, name } = {}) {
   return (
-    response?.worktree?.path ||
     response?.result?.worktree?.path ||
+    response?.worktree?.path ||
+    response?.result?.path ||
     response?.path ||
-    response?.worktree_path ||
     (dryRun ? `dry-run-worktree/${name}` : undefined)
   );
+}
+
+export function extractRootPaneId(response) {
+  return response?.result?.root_pane?.pane_id || response?.root_pane?.pane_id || undefined;
+}
+
+export function extractAgentPaneId(response) {
+  return response?.result?.agent?.pane_id || response?.agent?.pane_id || undefined;
 }
 ```
 
@@ -284,7 +315,7 @@ Expected: PASS.
 
 ```bash
 git add src/herdr.js test/runtime.test.js
-git commit -m "feat: add Herdr agent-stop, workspace-close, and worktree verbs"
+git commit -m "feat: add Herdr pane-close, workspace-close, worktree verbs and pane extractors"
 ```
 
 ---
@@ -296,7 +327,7 @@ git commit -m "feat: add Herdr agent-stop, workspace-close, and worktree verbs"
 - Test: `test/runtime.test.js` (append — uses a fake herdr)
 
 **Interfaces:**
-- Consumes: `HerdrCli`, `extractWorkspaceId`, `extractWorktreePath` from `./herdr.js`; `commandForAgent`, `getAgentProfile` from `./agents.js`; `buildWorkerPrompt`, `normalizeTask` from `./planner.js`.
+- Consumes: `HerdrCli`, `extractWorkspaceId`, `extractWorktreePath`, `extractRootPaneId`, `extractAgentPaneId` from `./herdr.js`; `commandForAgent`, `getAgentProfile` from `./agents.js`; `buildWorkerPrompt`, `normalizeTask` from `./planner.js`.
 - Produces: `createDroverRuntime(config)` → object with:
   - `delegate(spec)` → `{ id, workerName, agent, task, isolation, startResult }`
   - `delegateMany(specs, { wait })` → `{ workspace, launched, waits, commands }`
@@ -319,17 +350,27 @@ function makeFakeHerdr(responses = {}) {
     dryRun: false,
     commands: [],
     calls: [],
+    _paneSeq: 1,
     _push(method, args, ret) {
       this.calls.push({ method, args });
       return ret;
     },
     async createWorkspace(opts) {
       this.commands.push(["workspace", "create"]);
-      return this._push("createWorkspace", [opts], responses.createWorkspace ?? { workspace: { id: "ws-1" } });
+      return this._push(
+        "createWorkspace",
+        [opts],
+        responses.createWorkspace ?? { result: { workspace: { id: "ws-1" }, root_pane: { pane_id: "ws-1:p1" } } },
+      );
     },
     async startAgent(opts) {
       this.commands.push(["agent", "start", opts.name]);
-      return this._push("startAgent", [opts], { started: opts.name });
+      const paneId = `ws-1:p${++this._paneSeq}`; // root pane is p1
+      return this._push("startAgent", [opts], { result: { agent: { pane_id: paneId } } });
+    },
+    async closePane(paneId) {
+      this.commands.push(["pane", "close", paneId]);
+      return this._push("closePane", [paneId], {});
     },
     async sendAgent(target, text) {
       this.commands.push(["agent", "send", target]);
@@ -341,14 +382,15 @@ function makeFakeHerdr(responses = {}) {
     async readAgent(target, opts) {
       return this._push("readAgent", [target, opts], responses.readAgent ?? { stdout: "worker output" });
     },
-    async stopAgent(target) {
-      return this._push("stopAgent", [target], {});
-    },
     async closeWorkspace(id) {
       return this._push("closeWorkspace", [id], {});
     },
     async createWorktree(opts) {
-      return this._push("createWorktree", [opts], responses.createWorktree ?? { worktree: { path: `/wt/${opts.name}` } });
+      return this._push(
+        "createWorktree",
+        [opts],
+        responses.createWorktree ?? { result: { worktree: { path: `/wt/${opts.branch}` } } },
+      );
     },
     async notify(...args) {
       return this._push("notify", args, {});
@@ -398,9 +440,27 @@ test("delegate with worktree isolation creates worktree and starts there", async
   await drover.delegate({ name: "builder", agent: "kiro", task: "build", isolation: "worktree" });
 
   const wt = only(herdr, "createWorktree")[0].args[0];
-  assert.equal(wt.name, "sup-builder");
+  assert.equal(wt.branch, "drover/sup-builder");
+  assert.equal(wt.cwd, "/repo");
   const start = only(herdr, "startAgent")[0].args[0];
-  assert.equal(start.cwd, "/wt/sup-builder");
+  assert.equal(start.cwd, "/wt/drover/sup-builder");
+});
+
+test("first delegate closes the workspace bootstrap pane exactly once", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "sup" });
+  await drover.delegate({ name: "a", agent: "kiro", task: "x" });
+  await drover.delegate({ name: "b", agent: "kiro", task: "y" });
+  const closes = only(herdr, "closePane").map((c) => c.args[0]);
+  assert.deepEqual(closes, ["ws-1:p1"]); // only the bootstrap pane, once
+});
+
+test("delegate does not close a bootstrap pane when reusing an existing workspace", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, workspaceId: "ext-ws", cwd: "/repo", namePrefix: "sup" });
+  await drover.delegate({ name: "a", agent: "kiro", task: "x" });
+  assert.equal(only(herdr, "createWorkspace").length, 0);
+  assert.equal(only(herdr, "closePane").length, 0);
 });
 
 test("delegateMany returns legacy shape and waits when asked", async () => {
@@ -438,7 +498,8 @@ test("observe, collect, release, and close drive the right herdr methods", async
   assert.equal(collected.agent, "kiro");
 
   await drover.release(a.id);
-  assert.deepEqual(only(herdr, "stopAgent")[0].args, ["sup-a"]);
+  const paneCloses = only(herdr, "closePane").map((c) => c.args[0]);
+  assert.ok(paneCloses.includes("ws-1:p2")); // worker a's own pane (p1 was bootstrap)
 
   await drover.close({ closeWorkspace: true });
   assert.equal(only(herdr, "closeWorkspace")[0].args[0], "ws-1");
@@ -460,7 +521,13 @@ Expected: FAIL — `Cannot find module '../src/runtime.js'`.
 - [ ] **Step 3: Write `src/runtime.js`**
 
 ```js
-import { HerdrCli, extractWorkspaceId, extractWorktreePath } from "./herdr.js";
+import {
+  HerdrCli,
+  extractWorkspaceId,
+  extractWorktreePath,
+  extractRootPaneId,
+  extractAgentPaneId,
+} from "./herdr.js";
 import { commandForAgent, getAgentProfile } from "./agents.js";
 import { buildWorkerPrompt, normalizeTask } from "./planner.js";
 
@@ -483,6 +550,8 @@ export function createDroverRuntime(config = {}) {
   const registry = new Map();
   let workspace = workspaceId ? { workspaceId, created: false } : null;
   let workspacePromise = null;
+  let rootPaneId;
+  let bootstrapClosed = false;
 
   async function ensureWorkspace() {
     if (workspace) return workspace;
@@ -491,6 +560,7 @@ export function createDroverRuntime(config = {}) {
       workspacePromise = herdr
         .createWorkspace({ cwd, label, focus: false, env: { DROVER_WORKSPACE: label } })
         .then((result) => {
+          rootPaneId = extractRootPaneId(result);
           workspace = {
             workspaceId: extractWorkspaceId(result) || (herdr.dryRun ? `dry-run-${label}` : undefined),
             created: true,
@@ -520,7 +590,6 @@ export function createDroverRuntime(config = {}) {
     let worktree;
     if (normalized.isolation === "worktree") {
       const wtResult = await herdr.createWorktree({
-        name: workerName,
         cwd: workerCwd,
         branch: `drover/${workerName}`,
       });
@@ -547,6 +616,13 @@ export function createDroverRuntime(config = {}) {
       focus: isFirst,
     });
 
+    // Close the bootstrap shell pane herdr spawns with a fresh workspace, so the
+    // run leaves only real worker panes. Only when this runtime created the ws.
+    if (isFirst && workspace.created && rootPaneId && !bootstrapClosed) {
+      bootstrapClosed = true;
+      await herdr.closePane(rootPaneId);
+    }
+
     const prompt = buildWorkerPrompt({
       task: normalized.task,
       workerName,
@@ -560,6 +636,7 @@ export function createDroverRuntime(config = {}) {
     registry.set(workerName, {
       id: workerName,
       workerName,
+      paneId: extractAgentPaneId(startResult),
       agent: profile.id,
       profile: profileName,
       task: normalized.task,
@@ -631,7 +708,8 @@ export function createDroverRuntime(config = {}) {
   async function release(id) {
     const record = requireRecord(id);
     if (record.stopped) return { id, workerName: record.workerName, stopped: true };
-    const result = await herdr.stopAgent(record.workerName);
+    let result;
+    if (record.paneId) result = await herdr.closePane(record.paneId);
     record.stopped = true;
     return { id, workerName: record.workerName, result };
   }
@@ -639,7 +717,7 @@ export function createDroverRuntime(config = {}) {
   async function close({ closeWorkspace: shouldClose = false } = {}) {
     for (const record of registry.values()) {
       if (!record.stopped) {
-        await herdr.stopAgent(record.workerName);
+        if (record.paneId) await herdr.closePane(record.paneId);
         record.stopped = true;
       }
     }
@@ -1011,9 +1089,10 @@ or resume work.
 - Same-repo parallel workers: pass `isolation: "worktree"` so each worker gets an
   isolated dir + branch and they do not stomp each other.
 
-Note: `agent stop`, `workspace close`, and `worktree create` Herdr verbs are
-assumed by Drover; confirm them against your Herdr version before relying on live
-teardown.
+Note: Drover stops a worker by closing its pane (`herdr pane close <pane_id>` —
+there is no `agent stop`) and closes the workspace with `herdr workspace close`.
+It also closes the bootstrap shell pane Herdr opens with a fresh workspace, so a
+run leaves no orphan shell.
 
 ## Validation
 
@@ -1109,8 +1188,9 @@ runtime per workspace.
 
 Then in the "## Next Steps" list, remove the line
 `- Add worktree creation using \`herdr worktree create\` for isolated workers.`
-(now implemented) and add:
-`- Confirm Herdr teardown/worktree verb strings against a live Herdr build.`
+(now implemented). No replacement line — teardown (`pane close`), workspace
+close, and `worktree create` verbs are confirmed against herdr 0.7.2 and the
+facade closes the bootstrap shell pane after the first worker.
 
 - [ ] **Step 3: Verify docs render (no broken code fences)**
 
@@ -1133,9 +1213,14 @@ git commit -m "docs: document supervisor facade, cleanup, and worktree isolation
 
 ## Notes for the implementer
 
-- The teardown/worktree Herdr verbs are best-effort guesses. Tests assert only
-  the generated command arrays. When a live Herdr is available, confirm
-  `agent stop`, `workspace close`, and `worktree create` (and their flags), then
-  adjust `src/herdr.js` and the corresponding assertions in `test/runtime.test.js`.
+- The Herdr verbs are confirmed against herdr 0.7.2: a worker is stopped with
+  `pane close <pane_id>` (there is NO `agent stop`); `workspace close <id>`;
+  `worktree create [--cwd PATH|--workspace ID] [--branch NAME] ...` (no positional
+  name); `wait agent-status <t> --status done`. Tests assert generated command
+  arrays; when running live, re-read `herdr <group> --help` if a call errors.
+- `herdr workspace create` spawns a bootstrap shell pane. The facade closes it
+  after the first worker starts (Task 3) so a run leaves no orphan shell. This
+  only fires on real runs — in `--dry-run` the create result has no `root_pane`,
+  so no `pane close` is emitted.
 - Do not modify `src/cli.js` — Task 4 keeps `runDelegation`'s contract stable so
   the CLI keeps working unchanged.
