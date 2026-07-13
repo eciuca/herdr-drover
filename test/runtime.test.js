@@ -544,3 +544,36 @@ test("headlessResumeCommandForAgent returns continue/resume argv per agent", () 
 test("headlessResumeCommandForAgent honors an override command", () => {
   assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("claude"), ["x", "--y"]), ["x", "--y"]);
 });
+
+test("session mode builds a persistent turn-loop wrapper, writes turn 1, sends no prompt", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "worker", agent: "claude", task: "do the thing" });
+
+  assert.equal(only(herdr, "sendAgent").length, 0);
+  assert.equal(w.paneId, "ws-1:p2");
+
+  const script = only(herdr, "startAgent")[0].args[0].command[2];
+  // turn loop, tee to pane + file, per-turn marker, resume branch
+  assert.match(script, /while true/);
+  assert.match(script, /tee -a/);
+  assert.match(script, /__DROVER_DONE_s-worker__ turn=/);
+  for (const tok of ["claude", "-p", "--dangerously-skip-permissions"]) assert.ok(script.includes(tok));
+  assert.ok(script.includes("-c"), "resume branch uses claude -p -c");
+});
+
+import { readFile as _readFile } from "node:fs/promises";
+import { join as _join } from "node:path";
+
+test("session delegate writes the turn-1 prompt into the control dir", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  await drover.delegate({ name: "w2", agent: "kiro", task: "assignment body here" });
+  // control dir is <headlessDir>/<workerName>; turn-1 prompt is prompt.1
+  const text = await _readFile(_join(HEADLESS_TMP, "s-w2", "prompt.1"), "utf8");
+  assert.ok(text.includes("Assignment:\nassignment body here"));
+});

@@ -1,4 +1,4 @@
-import { writeFile, readFile, mkdtemp } from "node:fs/promises";
+import { writeFile, readFile, mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,7 +8,7 @@ import {
   extractRootPaneId,
   extractAgentPaneId,
 } from "./herdr.js";
-import { commandForAgent, headlessCommandForAgent, getAgentProfile } from "./agents.js";
+import { commandForAgent, headlessCommandForAgent, headlessResumeCommandForAgent, getAgentProfile } from "./agents.js";
 import { buildWorkerPrompt, normalizeTask } from "./planner.js";
 
 export function createDroverRuntime(config = {}) {
@@ -23,6 +23,7 @@ export function createDroverRuntime(config = {}) {
     defaultAgent = "kiro",
     agentProfile,
     agentCommand,
+    agentResumeCommand,
     workspaceId,
     workspaceLabel,
     execMode = "interactive",
@@ -81,6 +82,32 @@ export function createDroverRuntime(config = {}) {
     return { command: ["bash", "-lc", script], outFile, doneMarker, promptFile };
   }
 
+  // Build a persistent, visible turn-loop worker command. The pane waits for
+  // prompt.<n> files, runs the agent (turn 1 fresh; later turns resume the most
+  // recent conversation in the cwd), tees output to the pane AND an output file,
+  // then prints a per-turn completion marker. Prompt on stdin — no TUI driving.
+  async function prepareSession({ workerName, profile, profileName, prompt }) {
+    const turn1 = headlessCommandForAgent(profile, agentCommand, profileName);
+    const resume = headlessResumeCommandForAgent(profile, agentResumeCommand, profileName);
+    if (!headlessDir) headlessDir = await mkdtemp(join(tmpdir(), "drover-"));
+    const ctrlDir = join(headlessDir, workerName);
+    await mkdir(ctrlDir, { recursive: true });
+    const outFile = join(ctrlDir, "out");
+    const markerBase = `__DROVER_DONE_${workerName}__`;
+    await writeFile(join(ctrlDir, "prompt.1"), prompt);
+    const q = shellQuote;
+    const script =
+      `CTRL=${q(ctrlDir)}; OUT=${q(outFile)}; MARK=${q(markerBase)}; n=0; ` +
+      `while true; do ` +
+      `while [ ! -f "$CTRL/prompt.$((n+1))" ]; do sleep 0.3; done; ` +
+      `n=$((n+1)); ` +
+      `if [ "$n" -eq 1 ]; then ${turn1.map(q).join(" ")} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; ` +
+      `else ${resume.map(q).join(" ")} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; fi; ` +
+      `printf '\\n${markerBase} turn=%s exit=%s\\n' "$n" "\${PIPESTATUS[0]}"; ` +
+      `done`;
+    return { command: ["bash", "-lc", script], ctrlDir, outFile, markerBase };
+  }
+
   // NOTE: delegate mutates shared runtime state — the worker registry, the
   // lazily-bootstrapped workspace, and the bootstrap-pane-close latch
   // (bootstrapClosed). It MUST be awaited serially; callers must not invoke it
@@ -128,7 +155,11 @@ export function createDroverRuntime(config = {}) {
     // TUI to bootstrap or submit into. Interactive mode keeps the send flow.
     let command;
     let headless;
-    if (mode === "headless") {
+    let session;
+    if (mode === "session") {
+      session = await prepareSession({ workerName, profile, profileName, prompt });
+      command = session.command;
+    } else if (mode === "headless") {
       headless = await prepareHeadless({ workerName, profile, profileName, prompt });
       command = headless.command;
     } else {
@@ -153,7 +184,7 @@ export function createDroverRuntime(config = {}) {
       await herdr.closePane(rootPaneId);
     }
 
-    if (mode !== "headless") {
+    if (mode !== "headless" && mode !== "session") {
       await herdr.sendAgent(workerName, prompt);
     }
 
@@ -167,7 +198,10 @@ export function createDroverRuntime(config = {}) {
       isolation: normalized.isolation,
       worktree,
       mode,
-      outFile: headless?.outFile,
+      ctrlDir: session?.ctrlDir,
+      markerBase: session?.markerBase,
+      outFile: headless?.outFile ?? session?.outFile,
+      turn: session ? 1 : undefined,
       doneMarker: headless?.doneMarker,
       statusPolicy: normalized.statusPolicy,
       startResult,
@@ -177,6 +211,7 @@ export function createDroverRuntime(config = {}) {
     return {
       id: workerName,
       workerName,
+      paneId,
       agent: profile.id,
       task: normalized.task,
       isolation: normalized.isolation,
