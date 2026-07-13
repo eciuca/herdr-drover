@@ -120,10 +120,14 @@ await drover.observe(w.id);            // waits for turn 2
 const transcript = await drover.collect(w.id);
 ```
 
-Multi-turn resume continues the most recent conversation in the worker's cwd, so
-give a multi-turn worker its own cwd (e.g. `isolation: "worktree"`) when other
-workers share the base directory. Reliable interactive TUI driving is not
-supported — session mode delivers visibility/takeover/multi-turn without it.
+Multi-turn resume is deterministic for `claude` (a per-worker session id is
+pinned, so turns resume the right conversation even when a cwd holds several).
+`kiro`/`codex` resume the most recent conversation in the worker's cwd, so give a
+multi-turn kiro/codex worker its own cwd (e.g. `isolation: "worktree"`) when
+other workers share the base directory. Session mode builds its launch commands
+per agent to thread the session id, so the `agentCommand` override does not apply
+in this mode. Reliable interactive TUI driving is not supported — session mode
+delivers visibility/takeover/multi-turn without it.
 
 - Hand-off is supervisor-driven: `delegate → observe → collect → delegate`.
 - Cleanup defaults to keep. Use `release(id)` / `close({ closeWorkspace })` to tear down.

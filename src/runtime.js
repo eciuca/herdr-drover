@@ -84,9 +84,12 @@ export function createDroverRuntime(config = {}) {
   }
 
   // Build a persistent, visible turn-loop worker command. The pane waits for
-  // prompt.<n> files, runs the agent (turn 1 fresh; later turns resume the most
+  // prompt.<n> files, runs the agent (turn 1 fresh; later turns resume the same
+  // session — claude pins a generated session id, kiro/codex continue the most
   // recent conversation in the cwd), tees output to the pane AND an output file,
   // then prints a per-turn completion marker. Prompt on stdin — no TUI driving.
+  // Note: session mode builds its commands per-agent to thread the session id,
+  // so the `agentCommand` / `agentResumeCommand` overrides do NOT apply here.
   async function prepareSession({ workerName, profile, profileName, prompt }) {
     const sessionId = randomUUID();
     const { first: turn1, resume } = sessionCommandsForAgent(profile, sessionId, profileName);
