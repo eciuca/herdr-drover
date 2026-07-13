@@ -678,6 +678,57 @@ test("followUp rejects unknown and non-session workers", async () => {
   await assert.rejects(() => drover.followUp(w.id, "x"), /not a session worker/);
 });
 
+import { existsSync as _existsSync } from "node:fs";
+
+test("release removes a session worker's control dir", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "rel", agent: "claude", task: "t" });
+  const ctrlDir = _join(HEADLESS_TMP, "s-rel");
+  assert.ok(_existsSync(ctrlDir), "control dir exists after delegate");
+
+  await drover.release(w.id);
+  assert.ok(!_existsSync(ctrlDir), "control dir is removed after release");
+
+  // Releasing again (already gone) must not throw.
+  await drover.release(w.id);
+});
+
+test("close removes remaining session workers' control dirs", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  await drover.delegate({ name: "c1", agent: "claude", task: "t" });
+  await drover.delegate({ name: "c2", agent: "kiro", task: "t" });
+  const d1 = _join(HEADLESS_TMP, "s-c1");
+  const d2 = _join(HEADLESS_TMP, "s-c2");
+  assert.ok(_existsSync(d1) && _existsSync(d2), "both control dirs exist");
+
+  await drover.close(); // cleanup "keep" → per-worker teardown path
+  assert.ok(!_existsSync(d1), "c1 control dir removed on close");
+  assert.ok(!_existsSync(d2), "c2 control dir removed on close");
+  // The caller-provided headlessDir root must survive.
+  assert.ok(_existsSync(HEADLESS_TMP), "shared caller-provided headlessDir is preserved");
+});
+
+test("release removes a headless worker's prompt/out files", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "hlrel", execMode: "headless", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "hw", agent: "claude", task: "t" });
+  const promptFile = _join(HEADLESS_TMP, "hlrel-hw.prompt");
+  const outFile = _join(HEADLESS_TMP, "hlrel-hw.out");
+  assert.ok(_existsSync(promptFile), "prompt file exists after delegate");
+
+  await drover.release(w.id);
+  assert.ok(!_existsSync(promptFile), "prompt file removed after release");
+  assert.ok(!_existsSync(outFile), "out file removed after release");
+});
+
 test("workers() includes paneId", async () => {
   const herdr = makeFakeHerdr();
   const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP });
