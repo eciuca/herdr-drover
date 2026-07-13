@@ -22,6 +22,11 @@ export const AGENT_PROFILES = {
     headlessCommand(profileName = "developer") {
       return ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", profileName];
     },
+    // Headless resume: continue the most recent conversation in the worker's cwd
+    // (verified live). Prompt still arrives on stdin via the Drover wrapper.
+    headlessResumeCommand(profileName = "developer") {
+      return ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", profileName];
+    },
   },
   codex: {
     id: "codex",
@@ -41,6 +46,10 @@ export const AGENT_PROFILES = {
     headlessCommand() {
       return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"];
     },
+    // UNVERIFIED (issue #2): codex not installed; resume argv is best-effort.
+    headlessResumeCommand() {
+      return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "-"];
+    },
   },
   claude: {
     id: "claude",
@@ -55,6 +64,11 @@ export const AGENT_PROFILES = {
     // avoids the interactive TUI's folder-trust gate and submit handling.
     headlessCommand() {
       return ["claude", "-p", "--dangerously-skip-permissions"];
+    },
+    // Headless resume: `-c` continues the most recent conversation in the cwd
+    // (verified live). Prompt arrives on stdin.
+    headlessResumeCommand() {
+      return ["claude", "-p", "-c", "--dangerously-skip-permissions"];
     },
   },
 };
@@ -81,4 +95,13 @@ export function headlessCommandForAgent(profile, overrideCommand, profileName) {
   if (overrideCommand?.length) return overrideCommand;
   if (profile.headlessCommand) return profile.headlessCommand(profileName || profile.defaultProfile);
   throw new Error(`Agent "${profile.id}" has no headless command; use interactive mode or pass agentCommand.`);
+}
+
+// The bare headless resume (continue-most-recent-conversation) agent argv. The
+// prompt is delivered on stdin by the Drover headless wrapper, never in the
+// argv. Throws for agents that do not yet define a headless resume invocation.
+export function headlessResumeCommandForAgent(profile, overrideCommand, profileName) {
+  if (overrideCommand?.length) return overrideCommand;
+  if (profile.headlessResumeCommand) return profile.headlessResumeCommand(profileName || profile.defaultProfile);
+  throw new Error(`Agent "${profile.id}" has no headless resume command.`);
 }

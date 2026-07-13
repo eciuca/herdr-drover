@@ -445,7 +445,7 @@ test("missing pane id never warns in dry-run mode", async () => {
   assert.equal(messages.length, 0);
 });
 
-import { headlessCommandForAgent, getAgentProfile } from "../src/agents.js";
+import { headlessCommandForAgent, getAgentProfile, headlessResumeCommandForAgent } from "../src/agents.js";
 
 test("headlessCommandForAgent returns the non-interactive kiro argv (stdin prompt)", () => {
   const argv = headlessCommandForAgent(getAgentProfile("kiro"), undefined, "developer");
@@ -527,4 +527,20 @@ test("explicit closeWorkspace arg overrides the cleanup setting", async () => {
   const result = await keepDrover.close({ closeWorkspace: false });
   assert.equal(result.closed, false, "closeWorkspace:false overrides close");
   assert.equal(only(keepHerdr, "closeWorkspace").length, 0);
+});
+
+test("headlessResumeCommandForAgent returns continue/resume argv per agent", () => {
+  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("claude")), [
+    "claude", "-p", "-c", "--dangerously-skip-permissions",
+  ]);
+  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("kiro"), undefined, "developer"), [
+    "kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", "developer",
+  ]);
+  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("codex")), [
+    "codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "-",
+  ]);
+});
+
+test("headlessResumeCommandForAgent honors an override command", () => {
+  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("claude"), ["x", "--y"]), ["x", "--y"]);
 });
