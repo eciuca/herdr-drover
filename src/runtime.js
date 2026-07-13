@@ -97,7 +97,7 @@ export function createDroverRuntime(config = {}) {
     await writeFile(join(ctrlDir, "prompt.1"), prompt);
     const q = shellQuote;
     const script =
-      `CTRL=${q(ctrlDir)}; OUT=${q(outFile)}; MARK=${q(markerBase)}; n=0; ` +
+      `CTRL=${q(ctrlDir)}; OUT=${q(outFile)}; n=0; ` +
       `while true; do ` +
       `while [ ! -f "$CTRL/prompt.$((n+1))" ]; do sleep 0.3; done; ` +
       `n=$((n+1)); ` +
@@ -258,8 +258,12 @@ export function createDroverRuntime(config = {}) {
 
   async function observe(id, { status = "done", timeoutMs = waitTimeoutMs } = {}) {
     const record = requireRecord(id);
-    // Headless workers signal completion by echoing a marker to their pane;
-    // interactive workers transition herdr agent-status (targeted by pane id).
+    // Session workers wait on the per-turn marker; headless workers signal
+    // completion by echoing a marker to their pane; interactive workers
+    // transition herdr agent-status (targeted by pane id).
+    if (record.mode === "session") {
+      return herdr.waitOutput(record.paneId, { match: `${record.markerBase} turn=${record.turn} `, timeoutMs });
+    }
     if (record.mode === "headless") {
       return herdr.waitOutput(record.paneId, { match: record.doneMarker, timeoutMs });
     }
@@ -268,8 +272,9 @@ export function createDroverRuntime(config = {}) {
 
   async function collect(id, { source, lines } = {}) {
     const record = requireRecord(id);
-    // Headless workers capture their output to a file (no flaky TUI scraping).
-    if (record.mode === "headless") {
+    // Headless and session workers capture their output to a file (no flaky
+    // TUI scraping).
+    if (record.mode === "headless" || record.mode === "session") {
       let output = "";
       try {
         output = await readFile(record.outFile, "utf8");
@@ -281,6 +286,14 @@ export function createDroverRuntime(config = {}) {
     const result = await herdr.readAgent(record.workerName, { source, lines });
     const output = result && typeof result.stdout === "string" ? result.stdout : result;
     return { id, workerName: record.workerName, agent: record.agent, output };
+  }
+
+  async function followUp(id, prompt) {
+    const record = requireRecord(id);
+    if (record.mode !== "session") throw new Error(`Worker "${id}" is not a session worker.`);
+    record.turn += 1;
+    await writeFile(join(record.ctrlDir, `prompt.${record.turn}`), String(prompt));
+    return { id, workerName: record.workerName, turn: record.turn };
   }
 
   // Surface a silent no-op: a live (non-dry-run) worker without a pane id can't
@@ -334,6 +347,7 @@ export function createDroverRuntime(config = {}) {
     return [...registry.values()].map((record) => ({
       id: record.id,
       workerName: record.workerName,
+      paneId: record.paneId,
       agent: record.agent,
       task: record.task,
       isolation: record.isolation,
@@ -346,6 +360,7 @@ export function createDroverRuntime(config = {}) {
     delegateMany,
     observe,
     collect,
+    followUp,
     release,
     close,
     workers,

@@ -577,3 +577,53 @@ test("session delegate writes the turn-1 prompt into the control dir", async () 
   const text = await _readFile(_join(HEADLESS_TMP, "s-w2", "prompt.1"), "utf8");
   assert.ok(text.includes("Assignment:\nassignment body here"));
 });
+
+test("session observe waits on the per-turn marker; collect reads the transcript file", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "w3", agent: "claude", task: "t" });
+
+  await drover.observe(w.id);
+  assert.equal(only(herdr, "waitAgent").length, 0, "session must not use agent-status");
+  const wo = only(herdr, "waitOutput")[0];
+  assert.equal(wo.args[0], "ws-1:p2");
+  assert.equal(wo.args[1].match, "__DROVER_DONE_s-w3__ turn=1 ");
+
+  const collected = await drover.collect(w.id);
+  assert.equal(typeof collected.output, "string"); // file may be empty under the fake
+  assert.equal(only(herdr, "readAgent").length, 0, "session collect must not read the pane");
+});
+
+test("followUp writes the next prompt and advances the turn; observe matches it", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "w4", agent: "claude", task: "first" });
+  const f = await drover.followUp(w.id, "second turn please");
+  assert.equal(f.turn, 2);
+
+  const text = await _readFile(_join(HEADLESS_TMP, "s-w4", "prompt.2"), "utf8");
+  assert.equal(text, "second turn please");
+
+  await drover.observe(w.id);
+  const lastWait = only(herdr, "waitOutput").at(-1);
+  assert.equal(lastWait.args[1].match, "__DROVER_DONE_s-w4__ turn=2 ");
+});
+
+test("followUp rejects unknown and non-session workers", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "s", headlessDir: HEADLESS_TMP });
+  await assert.rejects(() => drover.followUp("nope", "x"), /Unknown worker/);
+  const w = await drover.delegate({ name: "iw", agent: "kiro", task: "interactive" }); // default interactive
+  await assert.rejects(() => drover.followUp(w.id, "x"), /not a session worker/);
+});
+
+test("workers() includes paneId", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP });
+  const w = await drover.delegate({ name: "w5", agent: "claude", task: "t" });
+  assert.equal(drover.workers()[0].paneId, w.paneId);
+});
