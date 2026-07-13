@@ -278,7 +278,28 @@ export function createDroverRuntime(config = {}) {
     // completion by echoing a marker to their pane; interactive workers
     // transition herdr agent-status (targeted by pane id).
     if (record.mode === "session") {
-      return herdr.waitOutput(record.paneId, { match: `${record.markerBase} turn=${record.turn} `, timeoutMs });
+      // The turn-loop wrapper prints `<markerBase> turn=<n> exit=<code>` to the
+      // pane; wait output matches on the (turn-scoped) prefix. But the marker
+      // fires for a crashed turn too, so we must inspect the captured exit code:
+      // a non-zero exit is a failed turn, not "done".
+      const result = await herdr.waitOutput(record.paneId, {
+        match: `${record.markerBase} turn=${record.turn} `,
+        timeoutMs,
+      });
+      const exitCode = parseTurnExit(result, record.markerBase, record.turn);
+      if (exitCode !== undefined && exitCode !== 0) {
+        const err = new Error(
+          `Session worker "${id}" turn ${record.turn} exited with code ${exitCode}.`,
+        );
+        err.exitCode = exitCode;
+        throw err;
+      }
+      // Preserve "done" semantics for exit=0 (or an unparseable marker, e.g. the
+      // dry-run/fake path) while surfacing the code for callers that want it.
+      if (result && typeof result === "object" && !Array.isArray(result)) {
+        return { ...result, exitCode: exitCode ?? 0, ok: true };
+      }
+      return result;
     }
     if (record.mode === "headless") {
       return herdr.waitOutput(record.paneId, { match: record.doneMarker, timeoutMs });
@@ -389,6 +410,22 @@ export function createDroverRuntime(config = {}) {
       return workspace;
     },
   };
+}
+
+// Pull the per-turn exit code out of a `wait output` result. The turn marker is
+// `<markerBase> turn=<n> exit=<code>`; the result may be a plain string or a
+// herdr JSON object (e.g. { stdout }), so search a stringified form. Returns the
+// numeric code for the matched turn, or undefined when the marker/exit isn't
+// present (leave "done" semantics untouched in that case).
+function parseTurnExit(result, markerBase, turn) {
+  const text = typeof result === "string" ? result : JSON.stringify(result ?? "");
+  const re = new RegExp(`${escapeRegExp(markerBase)} turn=${turn} exit=(\\d+)`);
+  const match = text.match(re);
+  return match ? Number(match[1]) : undefined;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function shellQuote(value) {

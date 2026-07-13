@@ -624,6 +624,35 @@ test("session observe waits on the per-turn marker; collect reads the transcript
   assert.equal(only(herdr, "readAgent").length, 0, "session collect must not read the pane");
 });
 
+test("session observe surfaces a non-zero per-turn exit code (failed turn is not 'done')", async () => {
+  // The turn-loop wrapper prints `<marker> turn=<n> exit=<code>` to the pane;
+  // wait output returns that matched text. A non-zero exit must not read as done.
+  const herdr = makeFakeHerdr({ waitOutput: { stdout: "__DROVER_DONE_s-fail__ turn=1 exit=3\n" } });
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "fail", agent: "claude", task: "t" });
+
+  await assert.rejects(() => drover.observe(w.id), (err) => {
+    assert.match(err.message, /turn 1/);
+    assert.match(err.message, /code 3/);
+    assert.equal(err.exitCode, 3);
+    return true;
+  });
+});
+
+test("session observe resolves with exitCode 0 on a successful turn", async () => {
+  const herdr = makeFakeHerdr({ waitOutput: { stdout: "__DROVER_DONE_s-ok__ turn=1 exit=0\n" } });
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "ok", agent: "claude", task: "t" });
+
+  const result = await drover.observe(w.id);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.ok, true);
+});
+
 test("followUp writes the next prompt and advances the turn; observe matches it", async () => {
   const herdr = makeFakeHerdr();
   const drover = createDroverRuntime({
