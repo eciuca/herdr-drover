@@ -445,7 +445,7 @@ test("missing pane id never warns in dry-run mode", async () => {
   assert.equal(messages.length, 0);
 });
 
-import { headlessCommandForAgent, getAgentProfile, headlessResumeCommandForAgent } from "../src/agents.js";
+import { headlessCommandForAgent, getAgentProfile, sessionCommandsForAgent } from "../src/agents.js";
 
 test("headlessCommandForAgent returns the non-interactive kiro argv (stdin prompt)", () => {
   const argv = headlessCommandForAgent(getAgentProfile("kiro"), undefined, "developer");
@@ -529,20 +529,18 @@ test("explicit closeWorkspace arg overrides the cleanup setting", async () => {
   assert.equal(only(keepHerdr, "closeWorkspace").length, 0);
 });
 
-test("headlessResumeCommandForAgent returns continue/resume argv per agent", () => {
-  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("claude")), [
-    "claude", "-p", "-c", "--dangerously-skip-permissions",
-  ]);
-  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("kiro"), undefined, "developer"), [
-    "kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", "developer",
-  ]);
-  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("codex")), [
-    "codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "-",
-  ]);
+test("sessionCommandsForAgent pins a caller-provided session id for claude", () => {
+  assert.deepEqual(sessionCommandsForAgent(getAgentProfile("claude"), "SID-123"), {
+    first: ["claude", "-p", "--session-id", "SID-123", "--dangerously-skip-permissions"],
+    resume: ["claude", "-p", "--resume", "SID-123", "--dangerously-skip-permissions"],
+  });
 });
 
-test("headlessResumeCommandForAgent honors an override command", () => {
-  assert.deepEqual(headlessResumeCommandForAgent(getAgentProfile("claude"), ["x", "--y"]), ["x", "--y"]);
+test("sessionCommandsForAgent for kiro ignores the session id (most-recent resume)", () => {
+  assert.deepEqual(sessionCommandsForAgent(getAgentProfile("kiro"), "SID-123", "developer"), {
+    first: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", "developer"],
+    resume: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", "developer"],
+  });
 });
 
 test("session mode builds a persistent turn-loop wrapper, writes turn 1, sends no prompt", async () => {
@@ -561,7 +559,9 @@ test("session mode builds a persistent turn-loop wrapper, writes turn 1, sends n
   assert.match(script, /tee -a/);
   assert.match(script, /__DROVER_DONE_s-worker__ turn=/);
   for (const tok of ["claude", "-p", "--dangerously-skip-permissions"]) assert.ok(script.includes(tok));
-  assert.ok(script.includes("-c"), "resume branch uses claude -p -c");
+  assert.ok(script.includes("--session-id"), "turn-1 branch pins a session id");
+  assert.ok(script.includes("--resume"), "resume branch resumes the pinned session id");
+  assert.match(script, /--dangerously-skip-permissions/g);
 });
 
 import { readFile as _readFile } from "node:fs/promises";

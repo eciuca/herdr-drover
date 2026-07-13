@@ -22,10 +22,14 @@ export const AGENT_PROFILES = {
     headlessCommand(profileName = "developer") {
       return ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", profileName];
     },
-    // Headless resume: continue the most recent conversation in the worker's cwd
-    // (verified live). Prompt still arrives on stdin via the Drover wrapper.
-    headlessResumeCommand(profileName = "developer") {
-      return ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", profileName];
+    // kiro has no launch-time session id; resume continues the most-recent
+    // conversation in the cwd. Give a multi-turn kiro worker its own cwd
+    // (isolation: "worktree") so concurrent workers don't cross-contaminate.
+    sessionCommands(sessionId, profileName = "developer") {
+      return {
+        first: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", profileName],
+        resume: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", profileName],
+      };
     },
   },
   codex: {
@@ -47,8 +51,11 @@ export const AGENT_PROFILES = {
       return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"];
     },
     // UNVERIFIED (issue #2): codex not installed; resume argv is best-effort.
-    headlessResumeCommand() {
-      return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "-"];
+    sessionCommands() {
+      return {
+        first: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"],
+        resume: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "-"],
+      };
     },
   },
   claude: {
@@ -65,10 +72,13 @@ export const AGENT_PROFILES = {
     headlessCommand() {
       return ["claude", "-p", "--dangerously-skip-permissions"];
     },
-    // Headless resume: `-c` continues the most recent conversation in the cwd
-    // (verified live). Prompt arrives on stdin.
-    headlessResumeCommand() {
-      return ["claude", "-p", "-c", "--dangerously-skip-permissions"];
+    // Session mode: pin a caller-provided session id so multi-turn resume is
+    // deterministic regardless of other conversations in the cwd (verified live).
+    sessionCommands(sessionId, profileName = "developer") {
+      return {
+        first: ["claude", "-p", "--session-id", sessionId, "--dangerously-skip-permissions"],
+        resume: ["claude", "-p", "--resume", sessionId, "--dangerously-skip-permissions"],
+      };
     },
   },
 };
@@ -97,11 +107,11 @@ export function headlessCommandForAgent(profile, overrideCommand, profileName) {
   throw new Error(`Agent "${profile.id}" has no headless command; use interactive mode or pass agentCommand.`);
 }
 
-// The bare headless resume (continue-most-recent-conversation) agent argv. The
-// prompt is delivered on stdin by the Drover headless wrapper, never in the
-// argv. Throws for agents that do not yet define a headless resume invocation.
-export function headlessResumeCommandForAgent(profile, overrideCommand, profileName) {
-  if (overrideCommand?.length) return overrideCommand;
-  if (profile.headlessResumeCommand) return profile.headlessResumeCommand(profileName || profile.defaultProfile);
-  throw new Error(`Agent "${profile.id}" has no headless resume command.`);
+// Session-mode command pair for a multi-turn worker: { first, resume }. Some
+// agents (claude) accept a caller-pinned session id for deterministic resume;
+// others (kiro, codex) resume the most-recent conversation. Throws for agents
+// that do not yet define session commands.
+export function sessionCommandsForAgent(profile, sessionId, profileName) {
+  if (!profile.sessionCommands) throw new Error(`Agent "${profile.id}" has no session commands.`);
+  return profile.sessionCommands(sessionId, profileName || profile.defaultProfile);
 }

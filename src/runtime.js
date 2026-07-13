@@ -1,6 +1,7 @@
 import { writeFile, readFile, mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   HerdrCli,
   extractWorkspaceId,
@@ -8,7 +9,7 @@ import {
   extractRootPaneId,
   extractAgentPaneId,
 } from "./herdr.js";
-import { commandForAgent, headlessCommandForAgent, headlessResumeCommandForAgent, getAgentProfile } from "./agents.js";
+import { commandForAgent, headlessCommandForAgent, sessionCommandsForAgent, getAgentProfile } from "./agents.js";
 import { buildWorkerPrompt, normalizeTask } from "./planner.js";
 
 export function createDroverRuntime(config = {}) {
@@ -87,8 +88,8 @@ export function createDroverRuntime(config = {}) {
   // recent conversation in the cwd), tees output to the pane AND an output file,
   // then prints a per-turn completion marker. Prompt on stdin — no TUI driving.
   async function prepareSession({ workerName, profile, profileName, prompt }) {
-    const turn1 = headlessCommandForAgent(profile, agentCommand, profileName);
-    const resume = headlessResumeCommandForAgent(profile, agentResumeCommand, profileName);
+    const sessionId = randomUUID();
+    const { first: turn1, resume } = sessionCommandsForAgent(profile, sessionId, profileName);
     if (!headlessDir) headlessDir = await mkdtemp(join(tmpdir(), "drover-"));
     const ctrlDir = join(headlessDir, workerName);
     await mkdir(ctrlDir, { recursive: true });
