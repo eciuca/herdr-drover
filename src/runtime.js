@@ -1,4 +1,4 @@
-import { writeFile, readFile, mkdtemp, mkdir } from "node:fs/promises";
+import { writeFile, readFile, mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -205,6 +205,7 @@ export function createDroverRuntime(config = {}) {
       ctrlDir: session?.ctrlDir,
       markerBase: session?.markerBase,
       outFile: headless?.outFile ?? session?.outFile,
+      promptFile: headless?.promptFile,
       turn: session ? 1 : undefined,
       doneMarker: headless?.doneMarker,
       statusPolicy: normalized.statusPolicy,
@@ -308,12 +309,23 @@ export function createDroverRuntime(config = {}) {
     }
   }
 
+  // Best-effort removal of a worker's on-disk control files: the session
+  // control dir (holds prompt.<n> + out) or the headless prompt/out pair. Never
+  // throws if the paths are already gone (force). Only touches per-worker paths,
+  // never the shared headlessDir root (which may be caller-provided).
+  async function cleanupWorkerFiles(record) {
+    if (record.ctrlDir) await rm(record.ctrlDir, { recursive: true, force: true });
+    if (record.promptFile) await rm(record.promptFile, { force: true });
+    if (record.mode === "headless" && record.outFile) await rm(record.outFile, { force: true });
+  }
+
   async function release(id) {
     const record = requireRecord(id);
     if (record.stopped) return { id, workerName: record.workerName, stopped: true };
     let result;
     if (record.paneId) result = await herdr.closePane(record.paneId);
     else warnMissingPane(record);
+    await cleanupWorkerFiles(record);
     record.stopped = true;
     return { id, workerName: record.workerName, result };
   }
@@ -328,7 +340,10 @@ export function createDroverRuntime(config = {}) {
     // also close panes individually (closing the last pane auto-closes the
     // workspace, and the follow-up `workspace close` would 404).
     if (shouldClose && workspace?.created && workspace.workspaceId) {
-      for (const record of registry.values()) record.stopped = true;
+      for (const record of registry.values()) {
+        await cleanupWorkerFiles(record);
+        record.stopped = true;
+      }
       let workspaceResult;
       try {
         workspaceResult = await herdr.closeWorkspace(workspace.workspaceId);
@@ -341,6 +356,7 @@ export function createDroverRuntime(config = {}) {
       if (!record.stopped) {
         if (record.paneId) await herdr.closePane(record.paneId);
         else warnMissingPane(record);
+        await cleanupWorkerFiles(record);
         record.stopped = true;
       }
     }
