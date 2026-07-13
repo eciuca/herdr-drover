@@ -1,3 +1,8 @@
+// Placeholder token in a resume argv that the session wrapper replaces with the
+// session id captured from turn 1's output (see codex below). Kept as a plain
+// string so profile argvs stay deep-equal-comparable in tests.
+export const SESSION_ID_SENTINEL = "__DROVER_SID__";
+
 export const AGENT_PROFILES = {
   kiro: {
     id: "kiro",
@@ -43,18 +48,27 @@ export const AGENT_PROFILES = {
     // non-interactively; the prompt is piped on stdin by the Drover wrapper (no
     // prompt in argv). `--dangerously-bypass-approvals-and-sandbox` runs without
     // approval prompts or sandbox gating so the worker can act unattended.
-    //
-    // UNVERIFIED (issue #2): codex is NOT installed in this environment, so this
-    // argv could not be validated against a live CLI. Flag names/behavior should
-    // be confirmed on a machine with codex before relying on it.
+    // Verified live against codex-cli 0.144.2 (issue #2).
     headlessCommand() {
       return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"];
     },
-    // UNVERIFIED (issue #2): codex not installed; resume argv is best-effort.
+    // Session mode: pin the EXPLICIT session id captured from turn 1's banner
+    // rather than `codex exec resume --last`. `--last` picks the newest session
+    // in the cwd, so two codex workers sharing a cwd would cross-resume each
+    // other (the same wrong-session hazard that makes claude pin its id). Turn 1
+    // prints `session id: <uuid>`; the wrapper greps it and substitutes it for
+    // SESSION_ID_SENTINEL on every resume. `codex exec resume <UUID> -` reads the
+    // follow-up prompt on stdin. Verified live against codex-cli 0.144.2.
     sessionCommands() {
       return {
         first: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"],
-        resume: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "-"],
+        resume: [
+          "codex", "exec", "resume", "--dangerously-bypass-approvals-and-sandbox",
+          SESSION_ID_SENTINEL, "-",
+        ],
+        // How the wrapper extracts turn 1's session id: the first output line
+        // matching `line`, then the first substring matching `pattern`.
+        captureSessionId: { line: "session id:", pattern: "[0-9a-f-]{36}" },
       };
     },
   },
@@ -107,10 +121,12 @@ export function headlessCommandForAgent(profile, overrideCommand, profileName) {
   throw new Error(`Agent "${profile.id}" has no headless command; use interactive mode or pass agentCommand.`);
 }
 
-// Session-mode command pair for a multi-turn worker: { first, resume }. Some
-// agents (claude) accept a caller-pinned session id for deterministic resume;
-// others (kiro, codex) resume the most-recent conversation. Throws for agents
-// that do not yet define session commands.
+// Session-mode command pair for a multi-turn worker: { first, resume, [captureSessionId] }.
+// Deterministic resume comes in two flavors: claude accepts a caller-pinned
+// session id; codex pins the id printed at turn 1 (the wrapper greps it via
+// captureSessionId and substitutes it for SESSION_ID_SENTINEL). kiro alone
+// resumes the most-recent conversation in the cwd. Throws for agents that do
+// not yet define session commands.
 export function sessionCommandsForAgent(profile, sessionId, profileName) {
   if (!profile.sessionCommands) throw new Error(`Agent "${profile.id}" has no session commands.`);
   return profile.sessionCommands(sessionId, profileName || profile.defaultProfile);

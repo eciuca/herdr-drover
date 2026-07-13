@@ -459,7 +459,7 @@ test("headlessCommandForAgent returns the non-interactive kiro argv (stdin promp
   ]);
 });
 
-test("headlessCommandForAgent returns the codex exec argv (UNVERIFIED, stdin prompt)", () => {
+test("headlessCommandForAgent returns the codex exec argv (verified live, stdin prompt)", () => {
   const argv = headlessCommandForAgent(getAgentProfile("codex"), undefined);
   assert.deepEqual(argv, ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"]);
 });
@@ -541,6 +541,34 @@ test("sessionCommandsForAgent for kiro ignores the session id (most-recent resum
     first: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", "developer"],
     resume: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", "developer"],
   });
+});
+
+test("sessionCommandsForAgent for codex pins the captured session id (not --last)", () => {
+  const cmds = sessionCommandsForAgent(getAgentProfile("codex"), "SID-123");
+  assert.deepEqual(cmds.first, ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"]);
+  // resume by explicit id via the sentinel; must NOT resume the most-recent (--last).
+  assert.deepEqual(cmds.resume, [
+    "codex", "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "__DROVER_SID__", "-",
+  ]);
+  assert.ok(!cmds.resume.includes("--last"), "codex must pin an explicit id, never --last");
+  assert.deepEqual(cmds.captureSessionId, { line: "session id:", pattern: "[0-9a-f-]{36}" });
+});
+
+test("session mode codex wrapper captures turn-1 id and resumes that exact session", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "sc", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  await drover.delegate({ name: "cx", agent: "codex", task: "do the codex thing" });
+
+  const script = only(herdr, "startAgent")[0].args[0].command[2];
+  // turn 1 greps the printed session id and stashes it
+  assert.match(script, /grep .*session id:.* head -1 .*grep -oE/);
+  assert.match(script, /> "\$CTRL\/sid"/);
+  // resume reads the stashed id and passes it to `codex exec resume <id> -`
+  assert.match(script, /SID=\$\(cat "\$CTRL\/sid"\)/);
+  assert.match(script, /'codex' 'exec' 'resume'.*"\$SID"/);
+  assert.ok(!script.includes("--last"), "codex resume must use the pinned id, not --last");
 });
 
 test("session mode builds a persistent turn-loop wrapper, writes turn 1, sends no prompt", async () => {

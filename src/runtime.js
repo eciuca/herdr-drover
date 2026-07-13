@@ -9,7 +9,7 @@ import {
   extractRootPaneId,
   extractAgentPaneId,
 } from "./herdr.js";
-import { commandForAgent, headlessCommandForAgent, sessionCommandsForAgent, getAgentProfile } from "./agents.js";
+import { commandForAgent, headlessCommandForAgent, sessionCommandsForAgent, getAgentProfile, SESSION_ID_SENTINEL } from "./agents.js";
 import { buildWorkerPrompt, normalizeTask } from "./planner.js";
 
 export function createDroverRuntime(config = {}) {
@@ -85,14 +85,15 @@ export function createDroverRuntime(config = {}) {
 
   // Build a persistent, visible turn-loop worker command. The pane waits for
   // prompt.<n> files, runs the agent (turn 1 fresh; later turns resume the same
-  // session — claude pins a generated session id, kiro/codex continue the most
-  // recent conversation in the cwd), tees output to the pane AND an output file,
+  // session — claude pins a generated session id, codex pins the id captured
+  // from turn 1's banner, kiro continues the most-recent conversation in the
+  // cwd), tees output to the pane AND an output file,
   // then prints a per-turn completion marker. Prompt on stdin — no TUI driving.
   // Note: session mode builds its commands per-agent to thread the session id,
   // so the `agentCommand` / `agentResumeCommand` overrides do NOT apply here.
   async function prepareSession({ workerName, profile, profileName, prompt }) {
     const sessionId = randomUUID();
-    const { first: turn1, resume } = sessionCommandsForAgent(profile, sessionId, profileName);
+    const { first: turn1, resume, captureSessionId } = sessionCommandsForAgent(profile, sessionId, profileName);
     if (!headlessDir) headlessDir = await mkdtemp(join(tmpdir(), "drover-"));
     const ctrlDir = join(headlessDir, workerName);
     await mkdir(ctrlDir, { recursive: true });
@@ -100,14 +101,25 @@ export function createDroverRuntime(config = {}) {
     const markerBase = `__DROVER_DONE_${workerName}__`;
     await writeFile(join(ctrlDir, "prompt.1"), prompt);
     const q = shellQuote;
+    // Substitute the session-id sentinel (codex resume) with the shell var the
+    // capture step fills; other tokens are shell-quoted literals.
+    const renderArgv = (argv) => argv.map((t) => (t === SESSION_ID_SENTINEL ? '"$SID"' : q(t))).join(" ");
+    // Agents that resume by an id printed at turn 1 (codex): grep it out of the
+    // turn-1 output and stash it so later turns resume that exact session, never
+    // the most-recent one in the cwd.
+    const captureCmd = captureSessionId
+      ? `SID=$(grep ${q(captureSessionId.line)} "$OUT" | head -1 | grep -oE ${q(captureSessionId.pattern)}); printf '%s' "$SID" > "$CTRL/sid"; `
+      : "";
+    const loadSid = captureSessionId ? `SID=$(cat "$CTRL/sid"); ` : "";
     const script =
       `CTRL=${q(ctrlDir)}; OUT=${q(outFile)}; n=0; ` +
       `while true; do ` +
       `while [ ! -f "$CTRL/prompt.$((n+1))" ]; do sleep 0.3; done; ` +
       `n=$((n+1)); ` +
-      `if [ "$n" -eq 1 ]; then ${turn1.map(q).join(" ")} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; ` +
-      `else ${resume.map(q).join(" ")} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; fi; ` +
-      `printf '\\n${markerBase} turn=%s exit=%s\\n' "$n" "\${PIPESTATUS[0]}"; ` +
+      // Preserve the turn's exit code in rc BEFORE any capture grep clobbers PIPESTATUS.
+      `if [ "$n" -eq 1 ]; then ${renderArgv(turn1)} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; rc=\${PIPESTATUS[0]}; ${captureCmd}` +
+      `else ${loadSid}${renderArgv(resume)} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; rc=\${PIPESTATUS[0]}; fi; ` +
+      `printf '\\n${markerBase} turn=%s exit=%s\\n' "$n" "$rc"; ` +
       `done`;
     return { command: ["bash", "-lc", script], ctrlDir, outFile, markerBase };
   }
