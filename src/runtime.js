@@ -1,6 +1,7 @@
-import { writeFile, readFile, mkdtemp } from "node:fs/promises";
+import { writeFile, readFile, mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   HerdrCli,
   extractWorkspaceId,
@@ -8,7 +9,7 @@ import {
   extractRootPaneId,
   extractAgentPaneId,
 } from "./herdr.js";
-import { commandForAgent, headlessCommandForAgent, getAgentProfile } from "./agents.js";
+import { commandForAgent, headlessCommandForAgent, sessionCommandsForAgent, getAgentProfile } from "./agents.js";
 import { buildWorkerPrompt, normalizeTask } from "./planner.js";
 
 export function createDroverRuntime(config = {}) {
@@ -23,6 +24,7 @@ export function createDroverRuntime(config = {}) {
     defaultAgent = "kiro",
     agentProfile,
     agentCommand,
+    agentResumeCommand,
     workspaceId,
     workspaceLabel,
     execMode = "interactive",
@@ -81,6 +83,35 @@ export function createDroverRuntime(config = {}) {
     return { command: ["bash", "-lc", script], outFile, doneMarker, promptFile };
   }
 
+  // Build a persistent, visible turn-loop worker command. The pane waits for
+  // prompt.<n> files, runs the agent (turn 1 fresh; later turns resume the same
+  // session — claude pins a generated session id, kiro/codex continue the most
+  // recent conversation in the cwd), tees output to the pane AND an output file,
+  // then prints a per-turn completion marker. Prompt on stdin — no TUI driving.
+  // Note: session mode builds its commands per-agent to thread the session id,
+  // so the `agentCommand` / `agentResumeCommand` overrides do NOT apply here.
+  async function prepareSession({ workerName, profile, profileName, prompt }) {
+    const sessionId = randomUUID();
+    const { first: turn1, resume } = sessionCommandsForAgent(profile, sessionId, profileName);
+    if (!headlessDir) headlessDir = await mkdtemp(join(tmpdir(), "drover-"));
+    const ctrlDir = join(headlessDir, workerName);
+    await mkdir(ctrlDir, { recursive: true });
+    const outFile = join(ctrlDir, "out");
+    const markerBase = `__DROVER_DONE_${workerName}__`;
+    await writeFile(join(ctrlDir, "prompt.1"), prompt);
+    const q = shellQuote;
+    const script =
+      `CTRL=${q(ctrlDir)}; OUT=${q(outFile)}; n=0; ` +
+      `while true; do ` +
+      `while [ ! -f "$CTRL/prompt.$((n+1))" ]; do sleep 0.3; done; ` +
+      `n=$((n+1)); ` +
+      `if [ "$n" -eq 1 ]; then ${turn1.map(q).join(" ")} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; ` +
+      `else ${resume.map(q).join(" ")} < "$CTRL/prompt.$n" 2>&1 | tee -a "$OUT"; fi; ` +
+      `printf '\\n${markerBase} turn=%s exit=%s\\n' "$n" "\${PIPESTATUS[0]}"; ` +
+      `done`;
+    return { command: ["bash", "-lc", script], ctrlDir, outFile, markerBase };
+  }
+
   // NOTE: delegate mutates shared runtime state — the worker registry, the
   // lazily-bootstrapped workspace, and the bootstrap-pane-close latch
   // (bootstrapClosed). It MUST be awaited serially; callers must not invoke it
@@ -128,7 +159,11 @@ export function createDroverRuntime(config = {}) {
     // TUI to bootstrap or submit into. Interactive mode keeps the send flow.
     let command;
     let headless;
-    if (mode === "headless") {
+    let session;
+    if (mode === "session") {
+      session = await prepareSession({ workerName, profile, profileName, prompt });
+      command = session.command;
+    } else if (mode === "headless") {
       headless = await prepareHeadless({ workerName, profile, profileName, prompt });
       command = headless.command;
     } else {
@@ -153,7 +188,7 @@ export function createDroverRuntime(config = {}) {
       await herdr.closePane(rootPaneId);
     }
 
-    if (mode !== "headless") {
+    if (mode !== "headless" && mode !== "session") {
       await herdr.sendAgent(workerName, prompt);
     }
 
@@ -167,7 +202,10 @@ export function createDroverRuntime(config = {}) {
       isolation: normalized.isolation,
       worktree,
       mode,
-      outFile: headless?.outFile,
+      ctrlDir: session?.ctrlDir,
+      markerBase: session?.markerBase,
+      outFile: headless?.outFile ?? session?.outFile,
+      turn: session ? 1 : undefined,
       doneMarker: headless?.doneMarker,
       statusPolicy: normalized.statusPolicy,
       startResult,
@@ -177,6 +215,7 @@ export function createDroverRuntime(config = {}) {
     return {
       id: workerName,
       workerName,
+      paneId,
       agent: profile.id,
       task: normalized.task,
       isolation: normalized.isolation,
@@ -223,8 +262,12 @@ export function createDroverRuntime(config = {}) {
 
   async function observe(id, { status = "done", timeoutMs = waitTimeoutMs } = {}) {
     const record = requireRecord(id);
-    // Headless workers signal completion by echoing a marker to their pane;
-    // interactive workers transition herdr agent-status (targeted by pane id).
+    // Session workers wait on the per-turn marker; headless workers signal
+    // completion by echoing a marker to their pane; interactive workers
+    // transition herdr agent-status (targeted by pane id).
+    if (record.mode === "session") {
+      return herdr.waitOutput(record.paneId, { match: `${record.markerBase} turn=${record.turn} `, timeoutMs });
+    }
     if (record.mode === "headless") {
       return herdr.waitOutput(record.paneId, { match: record.doneMarker, timeoutMs });
     }
@@ -233,8 +276,9 @@ export function createDroverRuntime(config = {}) {
 
   async function collect(id, { source, lines } = {}) {
     const record = requireRecord(id);
-    // Headless workers capture their output to a file (no flaky TUI scraping).
-    if (record.mode === "headless") {
+    // Headless and session workers capture their output to a file (no flaky
+    // TUI scraping).
+    if (record.mode === "headless" || record.mode === "session") {
       let output = "";
       try {
         output = await readFile(record.outFile, "utf8");
@@ -246,6 +290,14 @@ export function createDroverRuntime(config = {}) {
     const result = await herdr.readAgent(record.workerName, { source, lines });
     const output = result && typeof result.stdout === "string" ? result.stdout : result;
     return { id, workerName: record.workerName, agent: record.agent, output };
+  }
+
+  async function followUp(id, prompt) {
+    const record = requireRecord(id);
+    if (record.mode !== "session") throw new Error(`Worker "${id}" is not a session worker.`);
+    record.turn += 1;
+    await writeFile(join(record.ctrlDir, `prompt.${record.turn}`), String(prompt));
+    return { id, workerName: record.workerName, turn: record.turn };
   }
 
   // Surface a silent no-op: a live (non-dry-run) worker without a pane id can't
@@ -299,6 +351,7 @@ export function createDroverRuntime(config = {}) {
     return [...registry.values()].map((record) => ({
       id: record.id,
       workerName: record.workerName,
+      paneId: record.paneId,
       agent: record.agent,
       task: record.task,
       isolation: record.isolation,
@@ -311,6 +364,7 @@ export function createDroverRuntime(config = {}) {
     delegateMany,
     observe,
     collect,
+    followUp,
     release,
     close,
     workers,

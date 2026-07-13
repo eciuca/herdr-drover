@@ -445,7 +445,7 @@ test("missing pane id never warns in dry-run mode", async () => {
   assert.equal(messages.length, 0);
 });
 
-import { headlessCommandForAgent, getAgentProfile } from "../src/agents.js";
+import { headlessCommandForAgent, getAgentProfile, sessionCommandsForAgent } from "../src/agents.js";
 
 test("headlessCommandForAgent returns the non-interactive kiro argv (stdin prompt)", () => {
   const argv = headlessCommandForAgent(getAgentProfile("kiro"), undefined, "developer");
@@ -527,4 +527,103 @@ test("explicit closeWorkspace arg overrides the cleanup setting", async () => {
   const result = await keepDrover.close({ closeWorkspace: false });
   assert.equal(result.closed, false, "closeWorkspace:false overrides close");
   assert.equal(only(keepHerdr, "closeWorkspace").length, 0);
+});
+
+test("sessionCommandsForAgent pins a caller-provided session id for claude", () => {
+  assert.deepEqual(sessionCommandsForAgent(getAgentProfile("claude"), "SID-123"), {
+    first: ["claude", "-p", "--session-id", "SID-123", "--dangerously-skip-permissions"],
+    resume: ["claude", "-p", "--resume", "SID-123", "--dangerously-skip-permissions"],
+  });
+});
+
+test("sessionCommandsForAgent for kiro ignores the session id (most-recent resume)", () => {
+  assert.deepEqual(sessionCommandsForAgent(getAgentProfile("kiro"), "SID-123", "developer"), {
+    first: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--agent", "developer"],
+    resume: ["kiro-cli", "chat", "--no-interactive", "--trust-all-tools", "--resume", "--agent", "developer"],
+  });
+});
+
+test("session mode builds a persistent turn-loop wrapper, writes turn 1, sends no prompt", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "worker", agent: "claude", task: "do the thing" });
+
+  assert.equal(only(herdr, "sendAgent").length, 0);
+  assert.equal(w.paneId, "ws-1:p2");
+
+  const script = only(herdr, "startAgent")[0].args[0].command[2];
+  // turn loop, tee to pane + file, per-turn marker, resume branch
+  assert.match(script, /while true/);
+  assert.match(script, /tee -a/);
+  assert.match(script, /__DROVER_DONE_s-worker__ turn=/);
+  for (const tok of ["claude", "-p", "--dangerously-skip-permissions"]) assert.ok(script.includes(tok));
+  assert.ok(script.includes("--session-id"), "turn-1 branch pins a session id");
+  assert.ok(script.includes("--resume"), "resume branch resumes the pinned session id");
+  assert.match(script, /--dangerously-skip-permissions/g);
+});
+
+import { readFile as _readFile } from "node:fs/promises";
+import { join as _join } from "node:path";
+
+test("session delegate writes the turn-1 prompt into the control dir", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  await drover.delegate({ name: "w2", agent: "kiro", task: "assignment body here" });
+  // control dir is <headlessDir>/<workerName>; turn-1 prompt is prompt.1
+  const text = await _readFile(_join(HEADLESS_TMP, "s-w2", "prompt.1"), "utf8");
+  assert.ok(text.includes("Assignment:\nassignment body here"));
+});
+
+test("session observe waits on the per-turn marker; collect reads the transcript file", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "w3", agent: "claude", task: "t" });
+
+  await drover.observe(w.id);
+  assert.equal(only(herdr, "waitAgent").length, 0, "session must not use agent-status");
+  const wo = only(herdr, "waitOutput")[0];
+  assert.equal(wo.args[0], "ws-1:p2");
+  assert.equal(wo.args[1].match, "__DROVER_DONE_s-w3__ turn=1 ");
+
+  const collected = await drover.collect(w.id);
+  assert.equal(typeof collected.output, "string"); // file may be empty under the fake
+  assert.equal(only(herdr, "readAgent").length, 0, "session collect must not read the pane");
+});
+
+test("followUp writes the next prompt and advances the turn; observe matches it", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({
+    herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP,
+  });
+  const w = await drover.delegate({ name: "w4", agent: "claude", task: "first" });
+  const f = await drover.followUp(w.id, "second turn please");
+  assert.equal(f.turn, 2);
+
+  const text = await _readFile(_join(HEADLESS_TMP, "s-w4", "prompt.2"), "utf8");
+  assert.equal(text, "second turn please");
+
+  await drover.observe(w.id);
+  const lastWait = only(herdr, "waitOutput").at(-1);
+  assert.equal(lastWait.args[1].match, "__DROVER_DONE_s-w4__ turn=2 ");
+});
+
+test("followUp rejects unknown and non-session workers", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "s", headlessDir: HEADLESS_TMP });
+  await assert.rejects(() => drover.followUp("nope", "x"), /Unknown worker/);
+  const w = await drover.delegate({ name: "iw", agent: "kiro", task: "interactive" }); // default interactive
+  await assert.rejects(() => drover.followUp(w.id, "x"), /not a session worker/);
+});
+
+test("workers() includes paneId", async () => {
+  const herdr = makeFakeHerdr();
+  const drover = createDroverRuntime({ herdr, cwd: "/repo", namePrefix: "s", execMode: "session", headlessDir: HEADLESS_TMP });
+  const w = await drover.delegate({ name: "w5", agent: "claude", task: "t" });
+  assert.equal(drover.workers()[0].paneId, w.paneId);
 });

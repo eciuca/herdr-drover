@@ -101,6 +101,34 @@ await drover.observe(builder.id, { status: "done" });
 await drover.close({ closeWorkspace: true }); // cleanup is opt-in; default keeps workers
 ```
 
+### Session mode (visible, multi-turn, human takeover)
+
+`execMode: "session"` runs each worker as a persistent, **visible** agent in its
+own herdr pane — output streams to the pane (not just a file), so you can watch
+it, `herdr agent attach <paneId>` to take over, then hand back. Follow-up turns
+resume the same conversation.
+
+```js
+const drover = createDroverRuntime({ cwd: "/repo", namePrefix: "sup", execMode: "session" });
+
+const w = await drover.delegate({ name: "dev", agent: "claude", task: "Draft a plan" });
+await drover.observe(w.id);            // waits for turn 1's completion marker
+console.log(w.paneId);                 // herdr agent attach <paneId> to take over
+
+await drover.followUp(w.id, "Now implement step 1.");
+await drover.observe(w.id);            // waits for turn 2
+const transcript = await drover.collect(w.id);
+```
+
+Multi-turn resume is deterministic for `claude` (a per-worker session id is
+pinned, so turns resume the right conversation even when a cwd holds several).
+`kiro`/`codex` resume the most recent conversation in the worker's cwd, so give a
+multi-turn kiro/codex worker its own cwd (e.g. `isolation: "worktree"`) when
+other workers share the base directory. Session mode builds its launch commands
+per agent to thread the session id, so the `agentCommand` override does not apply
+in this mode. Reliable interactive TUI driving is not supported — session mode
+delivers visibility/takeover/multi-turn without it.
+
 - Hand-off is supervisor-driven: `delegate → observe → collect → delegate`.
 - Cleanup defaults to keep. Use `release(id)` / `close({ closeWorkspace })` to tear down.
 - Cross-repo work: one runtime per repo, sharing a session.

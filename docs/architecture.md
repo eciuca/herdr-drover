@@ -47,6 +47,18 @@ Cleanup defaults to `keep`; teardown is explicit. Same-repo parallelism uses
 `isolation: "worktree"` (Herdr `worktree create`); cross-repo work uses one
 runtime per workspace.
 
+## Session mode
+
+`execMode: "session"` launches a worker as a shell turn-loop in one persistent,
+visible herdr pane. The loop waits for `prompt.<n>` files, runs the agent (turn 1
+fresh; later turns resume via `claude -p -c` / `kiro ... --resume`), tees output
+to the pane and an output file, and prints a per-turn marker matched with
+`wait output`. `followUp(id, prompt)` drives the next turn; `collect` reads the
+transcript file; `paneId` (on the handle and in `workers()`) is the takeover
+point. This exists because driving an interactive agent TUI through herdr's
+text primitives proved unreliable; session mode keeps the reliable headless
+mechanism while adding visibility, takeover, and multi-turn.
+
 ## Next Steps
 
 - Add a planning phase that asks one agent to produce a task file, then launches the resulting workers.
